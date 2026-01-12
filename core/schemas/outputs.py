@@ -20,6 +20,7 @@ class SentinelDecision(str, Enum):
     """Risk assessment decision."""
     ALLOW = "ALLOW"
     BLOCK = "BLOCK"
+    CHALLENGE = "CHALLENGE"
 
 
 # =============================================================================
