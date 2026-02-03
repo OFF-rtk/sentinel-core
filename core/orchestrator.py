@@ -14,8 +14,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Union
 
-from core.models import KeyboardAnomalyModel, MouseAnomalyModel, NavigatorPolicyEngine
-from core.processors import ContextProcessor, KeyboardProcessor, MouseProcessor
+from core.models import KeyboardAnomalyModel, PhysicsMouseModel, NavigatorPolicyEngine
+from core.processors import NavigatorContextProcessor, KeyboardProcessor, MouseProcessor
 from core.schemas.inputs import EvaluationRequest, KeystrokePayload, MousePayload
 from core.schemas.outputs import (
     ActionContext,
@@ -68,11 +68,11 @@ class SentinelOrchestrator:
         # Feature processors
         self.keyboard_processor = KeyboardProcessor()
         self.mouse_processor = MouseProcessor()
-        self.context_processor = ContextProcessor()
+        self.context_processor = NavigatorContextProcessor()
         
         # Anomaly models
         self.keyboard_model = KeyboardAnomalyModel()
-        self.mouse_model = MouseAnomalyModel()
+        self.mouse_model = PhysicsMouseModel()
         
         # Policy engine
         self.navigator = NavigatorPolicyEngine()
@@ -154,15 +154,8 @@ class SentinelOrchestrator:
         # Extract features
         features = self.mouse_processor.extract_features(payload.events)
         
-        # Score (unpack tuple!)
+        # Score via physics model (stateless - no learning)
         risk, vectors = self.mouse_model.score_one(features)
-        
-        # Gated learning
-        if risk < self.LEARNING_THRESHOLD:
-            self.mouse_model.learn_one(features)
-            logger.debug(f"Mouse model trained (risk={risk:.4f})")
-        else:
-            logger.info(f"Skipping mouse training (High Risk: {risk:.4f})")
         
         # Persist to state
         self.state_manager.update_snapshot(

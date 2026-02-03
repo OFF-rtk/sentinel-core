@@ -105,6 +105,12 @@ class BusinessContext(BaseModel):
     )
 
 
+class ClientFingerprint(BaseModel):
+    """Client device and TLS fingerprint data for input."""
+    device_id: str = Field(..., description="Unique device identifier")
+    ja3_hash: Optional[str] = Field(None, description="TLS fingerprint hash")
+
+
 class ClientNetworkContext(BaseModel):
     """
     Network context captured by API gateway.
@@ -114,7 +120,11 @@ class ClientNetworkContext(BaseModel):
     user_agent: str = Field(..., description="Raw user agent string")
     ja3_hash: Optional[str] = Field(
         None, 
-        description="TLS fingerprint hash from gateway"
+        description="TLS fingerprint hash from gateway (deprecated, use client_fingerprint)"
+    )
+    client_fingerprint: Optional[ClientFingerprint] = Field(
+        None,
+        description="Client device fingerprint with device_id"
     )
 
 

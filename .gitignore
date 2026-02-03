@@ -1,10 +1,33 @@
-# Environments
+# Environments & Secrets
 .env
+.env.local
 .venv/
 env/
+
+# Python Artifacts
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Testing Artifacts
+.pytest_cache/
+.coverage
+htmlcov/
 
 # IDEs
 .vscode/
 .idea/
+
+# Infrastructure & Database Data
+infrastructure/redis/data/
+*.rdb
+*.aof
+dump.rdb
+
+# OS Junk
+.DS_Store
+Thumbs.db
+
+# Optional: Large Assets (Uncomment if you want to force download on deploy)
+# assets/GeoLite2-City.mmdb
