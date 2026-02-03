@@ -1,113 +1,37 @@
 """
-Sentinel Context Processor
+Sentinel Navigator Context Processor
 
-Derives contextual risk metrics from evaluation request and user history.
-Uses GeoIP lookup and behavioral analysis to generate the 7 "Golden Metrics".
+Enriches raw requests into numeric risk metrics only.
+No decisions. No blocking. Pure metric derivation.
+
+Uses GeoIP2 for location lookup and behavioral analysis.
 """
 
+import logging
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+import geoip2.database
+from user_agents import parse as parse_user_agent
 
 from core.schemas.inputs import EvaluationRequest
+from persistence.repository import SentinelStateRepository
+
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Mock GeoIP Database
+# ASN Reputation Scoring (MANDATORY)
 # =============================================================================
 
-# Mock IP to location mapping for demonstration
-# In production, this would use MaxMind GeoIP2 or similar service
-_IP_DB: Dict[str, Dict[str, Any]] = {
-    "107.208.116.189": {
-        "city": "West Billfort",
-        "country": "CA",
-        "asn": "AS58229 Allen, Espinoza and Campbell",
-        "coords": (49.2827, -123.1207),  # Vancouver area
-        "reputation": "corporate",
-    },
-    "192.168.1.1": {
-        "city": "Local",
-        "country": "US",
-        "asn": "AS0 Private Network",
-        "coords": (37.7749, -122.4194),  # San Francisco
-        "reputation": "residential",
-    },
-    "185.220.101.1": {
-        "city": "Unknown",
-        "country": "DE",
-        "asn": "AS12345 VPN Provider",
-        "coords": (52.5200, 13.4050),  # Berlin
-        "reputation": "vpn",
-    },
-}
-
-# Default for unknown IPs
-_DEFAULT_GEO = {
-    "city": "Unknown",
-    "country": "XX",
-    "asn": "AS0 Unknown",
-    "coords": (0.0, 0.0),
-    "reputation": "unknown",
-}
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def _haversine(coord1: Tuple[float, float], coord2: Tuple[float, float]) -> float:
-    """
-    Calculate the great-circle distance between two points on Earth.
-    
-    Args:
-        coord1: (latitude, longitude) of first point
-        coord2: (latitude, longitude) of second point
-        
-    Returns:
-        Distance in miles
-    """
-    lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
-    lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
-    
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    
-    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    c = 2 * math.asin(math.sqrt(a))
-    
-    # Earth's radius in miles
-    r = 3956
-    
-    return r * c
-
-
-def _lookup_ip(ip_address: str) -> Dict[str, Any]:
-    """
-    Look up IP address in mock database.
-    
-    Args:
-        ip_address: IPv4/IPv6 address string
-        
-    Returns:
-        GeoIP data dictionary
-    """
-    return _IP_DB.get(ip_address, _DEFAULT_GEO)
-
-
-# =============================================================================
-# IP Reputation Scoring
-# =============================================================================
-
-_REPUTATION_SCORES: Dict[str, float] = {
+ASN_REPUTATION: Dict[str, float] = {
     "residential": 0.0,
-    "corporate": 0.1,
-    "mobile": 0.2,
-    "hosting": 0.5,
-    "proxy": 0.7,
-    "vpn": 0.8,
-    "tor": 1.0,
-    "unknown": 0.5,
+    "mobile": 0.1,
+    "unknown": 0.3,
+    "hosting": 0.9,
+    "vpn": 0.9,
 }
 
 
@@ -115,49 +39,66 @@ _REPUTATION_SCORES: Dict[str, float] = {
 # Context Processor
 # =============================================================================
 
-class ContextProcessor:
+class NavigatorContextProcessor:
     """
-    Derives contextual risk metrics from evaluation request and user history.
+    Enriches raw requests into numeric risk metrics.
     
-    Metrics derived:
-    1. geo_velocity_mph: Travel speed between last and current location
-    2. time_since_last_seen: Seconds since last activity
-    3. is_new_device: Whether JA3 hash is unknown
-    4. transaction_magnitude: Ratio of current to average transaction
-    5. ip_reputation_score: Risk score based on IP type
-    6. time_anomaly_score: Whether action is outside usual hours
-    7. policy_violation_flag: Whether role violates resource access
+    This processor is responsible for:
+    1. GeoIP lookup and velocity calculation
+    2. Device identity verification
+    3. Session state analysis
+    4. Policy violation detection
+    
+    All outputs are numeric metrics - no decisions are made here.
     """
     
-    def derive_context_metrics(
-        self, 
-        request: EvaluationRequest, 
-        history: Dict[str, Any]
-    ) -> Dict[str, float]:
+    def __init__(self) -> None:
+        """Initialize processor with repository and GeoIP reader."""
+        self.repo = SentinelStateRepository()
+        
+        # GeoIP - Fail open if database is unavailable
+        try:
+            self.geoip = geoip2.database.Reader("assets/GeoLite2-City.mmdb")
+        except Exception as e:
+            logger.warning(f"GeoIP database unavailable, using defaults: {e}")
+            self.geoip = None
+    
+    def process(self, request: EvaluationRequest) -> Dict[str, float]:
         """
-        Derive all context metrics from request and user history.
+        Process evaluation request and derive all context metrics.
         
         Args:
-            request: Current evaluation request
-            history: User's historical data snapshot containing:
-                - last_geo_coords: (lat, lon) of last action
-                - last_seen_timestamp: Unix timestamp of last activity
-                - known_device_hashes: Set of known JA3 hashes
-                - avg_transaction_amount: Average transaction value
-                - usual_hours: List of typical activity hours (0-23)
-                - role: User's RBAC role
-                
+            request: The incoming evaluation request with user/network context
+            
         Returns:
-            Dictionary of metric names to values
+            Dictionary of metric names to float values:
+            - geo_velocity_mph: Travel speed between last and current location
+            - time_since_last_seen: Seconds since last activity
+            - device_ip_mismatch: 1.0 if Desktop UA + VPN/hosting ASN
+            - is_new_device: 1.0 if device_id is unknown
+            - simultaneous_sessions: Count of active sessions
+            - policy_violation: 1.0 if role violates resource access
+            - ip_reputation: Risk score based on IP type
         """
-        current_ip = request.network_context.ip_address
-        current_geo = _lookup_ip(current_ip)
+        user_id = request.user_session.user_id
         current_time = time.time()
         
-        return {
+        # Get user history from repository
+        history = self.repo.get_user_context(user_id)
+        
+        # Resolve current IP location
+        current_ip = request.network_context.ip_address
+        current_geo = self._resolve_ip(current_ip)
+        
+        # Get device_id from client fingerprint if available
+        # Note: This expects the EvaluationRequest to have client_fingerprint
+        device_id = self._get_device_id(request)
+        
+        # Calculate all metrics
+        metrics: Dict[str, float] = {
             "geo_velocity_mph": self._calc_geo_velocity(
                 history.get("last_geo_coords"),
-                current_geo.get("coords", (0.0, 0.0)),
+                current_geo.get("coords"),
                 history.get("last_seen_timestamp"),
                 current_time
             ),
@@ -165,65 +106,201 @@ class ContextProcessor:
                 history.get("last_seen_timestamp"),
                 current_time
             ),
-            "is_new_device": self._check_new_device(
-                request.network_context.ja3_hash,
-                history.get("known_device_hashes", set())
+            "device_ip_mismatch": self._calc_device_ip_mismatch(
+                request.network_context.user_agent,
+                current_geo.get("asn_type", "unknown")
             ),
-            "transaction_magnitude": self._calc_transaction_magnitude(
-                request.business_context.transaction_details,
-                history.get("avg_transaction_amount", 0.0)
+            "is_new_device": self._calc_is_new_device(
+                device_id,
+                history.get("known_device_hashes", [])
             ),
-            "ip_reputation_score": self._get_ip_reputation_score(current_ip),
-            "time_anomaly_score": self._calc_time_anomaly(
-                current_time,
-                history.get("usual_hours", [])
-            ),
-            "policy_violation_flag": self._check_policy_violation(
+            "simultaneous_sessions": float(history.get("active_session_count", 0)),
+            "policy_violation": self._calc_policy_violation(
                 request.user_session.role,
                 request.business_context.resource_target
             ),
+            "ip_reputation": ASN_REPUTATION.get(
+                current_geo.get("asn_type", "unknown"),
+                0.3
+            ),
         }
-    
-    def get_geo_location(self, ip_address: str) -> Dict[str, str]:
-        """
-        Get GeoLocation data for an IP address.
         
-        Returns dict with: asn, city, country
-        """
-        geo = _lookup_ip(ip_address)
-        return {
-            "asn": geo.get("asn", "AS0 Unknown"),
-            "city": geo.get("city", "Unknown"),
-            "country": geo.get("country", "XX"),
-        }
+        return metrics
     
-    def get_ip_reputation(self, ip_address: str) -> str:
-        """Get IP reputation category."""
-        geo = _lookup_ip(ip_address)
-        return geo.get("reputation", "unknown")
+    def _get_device_id(self, request: EvaluationRequest) -> Optional[str]:
+        """Extract device_id from request, if available."""
+        # The spec says device identity = request.client_fingerprint.device_id
+        # We need to check if client_fingerprint is available in network_context
+        if hasattr(request.network_context, 'client_fingerprint'):
+            fingerprint = request.network_context.client_fingerprint
+            if hasattr(fingerprint, 'device_id'):
+                return fingerprint.device_id
+        
+        # Fallback: generate from user agent if no device_id
+        return None
+    
+    def _resolve_ip(self, ip_address: str) -> Dict[str, Any]:
+        """
+        Resolve IP address to location data.
+        
+        Args:
+            ip_address: IPv4 or IPv6 address
+            
+        Returns:
+            Dict with coords, asn_type, city, country
+            Returns neutral defaults for private IPs or on GeoIP failure
+        """
+        # Check for private/reserved IP ranges
+        if self._is_private_ip(ip_address):
+            return {
+                "coords": None,
+                "asn_type": "unknown",
+                "city": "Unknown",
+                "country": "XX",
+            }
+        
+        # If GeoIP is unavailable, return defaults
+        if self.geoip is None:
+            return {
+                "coords": None,
+                "asn_type": "unknown",
+                "city": "Unknown",
+                "country": "XX",
+            }
+        
+        try:
+            response = self.geoip.city(ip_address)
+            
+            coords = None
+            if response.location.latitude and response.location.longitude:
+                coords = (response.location.latitude, response.location.longitude)
+            
+            # Determine ASN type (simplified classification)
+            asn_type = self._classify_asn(response)
+            
+            return {
+                "coords": coords,
+                "asn_type": asn_type,
+                "city": response.city.name or "Unknown",
+                "country": response.country.iso_code or "XX",
+            }
+        except Exception as e:
+            logger.debug(f"GeoIP lookup failed for {ip_address}: {e}")
+            return {
+                "coords": None,
+                "asn_type": "unknown",
+                "city": "Unknown",
+                "country": "XX",
+            }
+    
+    def _is_private_ip(self, ip_address: str) -> bool:
+        """Check if IP is a private/reserved address."""
+        # Simple check for common private ranges
+        private_prefixes = (
+            "10.",
+            "172.16.", "172.17.", "172.18.", "172.19.",
+            "172.20.", "172.21.", "172.22.", "172.23.",
+            "172.24.", "172.25.", "172.26.", "172.27.",
+            "172.28.", "172.29.", "172.30.", "172.31.",
+            "192.168.",
+            "127.",
+            "0.",
+            "::1",
+            "fe80:",
+        )
+        return ip_address.startswith(private_prefixes)
+    
+    def _classify_asn(self, geoip_response: Any) -> str:
+        """
+        Classify ASN type from GeoIP response.
+        
+        Returns one of: residential, mobile, hosting, vpn, unknown
+        """
+        # In production, this would use additional ASN databases
+        # For now, return unknown and let external enrichment handle it
+        return "unknown"
+    
+    def _haversine(
+        self,
+        lat1: float,
+        lon1: float,
+        lat2: float,
+        lon2: float
+    ) -> float:
+        """
+        Calculate great-circle distance between two points.
+        
+        Args:
+            lat1, lon1: First point coordinates
+            lat2, lon2: Second point coordinates
+            
+        Returns:
+            Distance in miles
+        """
+        # Convert to radians
+        lat1_r = math.radians(lat1)
+        lon1_r = math.radians(lon1)
+        lat2_r = math.radians(lat2)
+        lon2_r = math.radians(lon2)
+        
+        dlat = lat2_r - lat1_r
+        dlon = lon2_r - lon1_r
+        
+        a = (
+            math.sin(dlat / 2) ** 2 +
+            math.cos(lat1_r) * math.cos(lat2_r) * math.sin(dlon / 2) ** 2
+        )
+        c = 2 * math.asin(math.sqrt(a))
+        
+        # Earth's radius in miles
+        r = 3956
+        
+        return r * c
     
     def _calc_geo_velocity(
         self,
         last_coords: Optional[Tuple[float, float]],
-        current_coords: Tuple[float, float],
+        current_coords: Optional[Tuple[float, float]],
         last_timestamp: Optional[float],
         current_timestamp: float
     ) -> float:
         """
-        Calculate geographic velocity (mph) between locations.
+        Calculate geographic velocity in mph.
         
-        Returns 0.0 if insufficient history or same location.
+        CRITICAL FIX:
+        - Returns 0.0 if no history (last_coords is None)
+        - Returns 0.0 if time delta < 1.0 second (prevents division issues)
+        - Otherwise returns miles / hours
         """
-        if last_coords is None or last_timestamp is None:
+        # No history - no velocity
+        if last_coords is None:
             return 0.0
         
-        distance_miles = _haversine(last_coords, current_coords)
-        time_hours = (current_timestamp - last_timestamp) / 3600.0
-        
-        if time_hours <= 0:
+        # No current location - no velocity
+        if current_coords is None:
             return 0.0
         
-        return distance_miles / time_hours
+        # No timestamp history - no velocity
+        if last_timestamp is None:
+            return 0.0
+        
+        # Calculate time since last seen in seconds
+        time_since_last_seen = current_timestamp - last_timestamp
+        
+        # Guard against very small time deltas (< 1 second)
+        if time_since_last_seen < 1.0:
+            return 0.0
+        
+        # Calculate distance in miles
+        miles = self._haversine(
+            last_coords[0], last_coords[1],
+            current_coords[0], current_coords[1]
+        )
+        
+        # Convert time to hours
+        hours = time_since_last_seen / 3600.0
+        
+        return miles / hours
     
     def _calc_time_since_last_seen(
         self,
@@ -232,81 +309,62 @@ class ContextProcessor:
     ) -> float:
         """Calculate seconds since last activity."""
         if last_timestamp is None:
-            return float("inf")
+            return 0.0
         
         return current_timestamp - last_timestamp
     
-    def _check_new_device(
+    def _calc_device_ip_mismatch(
         self,
-        ja3_hash: Optional[str],
-        known_hashes: set
+        user_agent: str,
+        asn_type: str
     ) -> float:
         """
-        Check if device is new (unknown JA3 hash).
+        Detect desktop user agent connecting from hosting/VPN IP.
         
-        Returns 1.0 if new, 0.0 if known.
+        Returns 1.0 if Desktop UA AND ASN in {"hosting", "vpn"}, else 0.0
         """
-        if ja3_hash is None:
-            return 0.5  # Uncertain without JA3
+        # Parse user agent
+        ua = parse_user_agent(user_agent)
         
-        return 0.0 if ja3_hash in known_hashes else 1.0
-    
-    def _calc_transaction_magnitude(
-        self,
-        transaction_details: Dict[str, Any],
-        avg_amount: float
-    ) -> float:
-        """
-        Calculate transaction magnitude ratio.
+        # Check if desktop
+        is_desktop = ua.is_pc
         
-        Returns current_amount / average_amount.
-        Returns 1.0 if no average available.
-        """
-        current_amount = transaction_details.get("amount", 0.0)
+        # Check if suspicious ASN
+        is_suspicious_asn = asn_type in {"hosting", "vpn"}
         
-        if avg_amount <= 0:
+        if is_desktop and is_suspicious_asn:
             return 1.0
         
-        return current_amount / avg_amount
+        return 0.0
     
-    def _get_ip_reputation_score(self, ip_address: str) -> float:
-        """
-        Get IP reputation score (0.0 = safe, 1.0 = risky).
-        """
-        geo = _lookup_ip(ip_address)
-        reputation = geo.get("reputation", "unknown")
-        return _REPUTATION_SCORES.get(reputation, 0.5)
-    
-    def _calc_time_anomaly(
+    def _calc_is_new_device(
         self,
-        current_timestamp: float,
-        usual_hours: List[int]
+        device_id: Optional[str],
+        known_devices: list
     ) -> float:
         """
-        Calculate time anomaly score.
+        Check if device is new (unknown device_id).
         
-        Returns 1.0 if current hour is outside usual hours, 0.0 otherwise.
-        Returns 0.0 if no usual hours data available.
+        Returns 1.0 if new device, 0.0 if known.
         """
-        if not usual_hours:
-            return 0.0
+        if device_id is None:
+            # No device_id means we can't verify - treat as new
+            return 1.0
         
-        # Get current hour in 24-hour format
-        current_hour = int(time.strftime("%H", time.localtime(current_timestamp)))
+        if device_id not in known_devices:
+            return 1.0
         
-        return 0.0 if current_hour in usual_hours else 1.0
+        return 0.0
     
-    def _check_policy_violation(
+    def _calc_policy_violation(
         self,
         role: str,
         resource_target: str
     ) -> float:
         """
-        Check for policy violations based on role and resource.
+        Check for role ↔ resource policy violations.
         
         Returns 1.0 if violation detected, 0.0 otherwise.
-        
-        Example violation: intern accessing production resources.
         """
         role_lower = role.lower()
         resource_lower = resource_target.lower()
@@ -317,6 +375,10 @@ class ContextProcessor:
         
         # Viewers cannot access admin resources
         if role_lower == "viewer" and "admin" in resource_lower:
+            return 1.0
+        
+        # Analyst cannot access secrets
+        if role_lower == "analyst" and "secret" in resource_lower:
             return 1.0
         
         return 0.0

@@ -1,129 +1,125 @@
 """
 Sentinel Navigator Policy Engine
 
-Rule-based decision engine that combines context metrics and ML scores
-to produce final risk assessment decisions with aggregated anomaly vectors.
+Pure business logic for risk assessment decisions.
+This module is STATELESS and DETERMINISTIC.
+
+No ML. No external calls. Just rules.
 """
 
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List
 
 from core.schemas.outputs import SentinelAnalysis, SentinelDecision
 
 
-# Engine version for audit trail
-_ENGINE_VERSION = "1.1.0"
+# =============================================================================
+# Engine Configuration
+# =============================================================================
+
+_ENGINE_VERSION = "2.0.0"
 
 
 class NavigatorPolicyEngine:
     """
-    Rule-based policy engine for risk decisions with vector aggregation.
-    
-    Evaluates context metrics and ML anomaly scores to produce
-    a final ALLOW/CHALLENGE/BLOCK decision with risk scoring.
-    Aggregates anomaly vectors from context, keyboard, and mouse.
+    Stateless, deterministic policy engine for risk decisions.
     
     Decision Logic:
-        BLOCK: Impossible travel (geo_velocity > 500 mph) OR policy violation
-        CHALLENGE: High ML score (> 0.8) OR new device
-        ALLOW: Otherwise
+        BLOCK: risk_score >= 0.85
+        CHALLENGE: risk_score >= 0.50
+        ALLOW: otherwise
+    
+    Anomaly Vectors:
+        - "impossible_travel" if velocity > MAX_VELOCITY
+        - "infra_mismatch" if device_ip_mismatch == 1.0
+        - "policy_violation" if policy_violation == 1.0
+    
+    Risk Score:
+        max(velocity_risk, infra_risk, policy_risk, device_risk)
     """
     
-    # Thresholds
-    _GEO_VELOCITY_THRESHOLD: float = 500.0  # mph
-    _ML_SCORE_THRESHOLD: float = 0.8
+    # Thresholds (STRICT)
+    MAX_VELOCITY: float = 500.0  # mph
+    BLOCK_THRESHOLD: float = 0.85
+    CHALLENGE_THRESHOLD: float = 0.50
     
-    def evaluate(
-        self,
-        context_metrics: Dict[str, Any],
-        biometric_data: Dict[str, Tuple[float, List[str]]]
-    ) -> SentinelAnalysis:
+    def evaluate(self, metrics: Dict[str, float]) -> SentinelAnalysis:
         """
-        Evaluate context metrics and biometric data to produce risk decision.
+        Evaluate context metrics and produce risk decision.
         
         Args:
-            context_metrics: Dictionary of context processor metrics including:
+            metrics: Dictionary of context metrics including:
                 - geo_velocity_mph: Travel speed between locations
-                - policy_violation_flag: 1.0 if policy violated, 0.0 otherwise
-                - is_new_device: 1.0 if device is new, 0.0 if known
-                - (other metrics from ContextProcessor)
-            biometric_data: Dictionary with keys 'keyboard' and 'mouse' containing
-                tuples of (anomaly_score, anomaly_vectors):
-                - anomaly_score: float from 0.0 to 1.0
-                - anomaly_vectors: List of feature drift tags (e.g., "dwell_mean_ms_high")
+                - device_ip_mismatch: 1.0 if desktop + VPN/hosting
+                - policy_violation: 1.0 if role violates access
+                - is_new_device: 1.0 if device is unknown
+                - ip_reputation: 0.0-1.0 reputation score
+                - simultaneous_sessions: Active session count
+                - time_since_last_seen: Seconds since last activity
         
         Returns:
-            SentinelAnalysis object with decision, risk_score, and aggregated anomaly_vectors.
+            SentinelAnalysis with decision, risk_score, and anomaly_vectors.
         """
         anomaly_vectors: List[str] = []
-        decision: SentinelDecision = SentinelDecision.ALLOW
         
-        # Extract context metrics with defaults
-        geo_velocity = float(context_metrics.get("geo_velocity_mph", 0.0))
-        policy_violation = float(context_metrics.get("policy_violation_flag", 0.0))
-        is_new_device = float(context_metrics.get("is_new_device", 0.0))
-        
-        # Extract biometric scores and vectors
-        keyboard_score, keyboard_vectors = biometric_data.get("keyboard", (0.0, []))
-        mouse_score, mouse_vectors = biometric_data.get("mouse", (0.0, []))
+        # Extract metrics with safe defaults
+        geo_velocity = float(metrics.get("geo_velocity_mph", 0.0))
+        device_ip_mismatch = float(metrics.get("device_ip_mismatch", 0.0))
+        policy_violation = float(metrics.get("policy_violation", 0.0))
+        is_new_device = float(metrics.get("is_new_device", 0.0))
         
         # =================================================================
-        # BLOCK Conditions (highest priority)
+        # Anomaly Vector Detection
         # =================================================================
         
-        # Check for impossible travel
-        if geo_velocity > self._GEO_VELOCITY_THRESHOLD:
+        # Impossible travel detection
+        if geo_velocity > self.MAX_VELOCITY:
             anomaly_vectors.append("impossible_travel")
-            decision = SentinelDecision.BLOCK
         
-        # Check for policy violation
+        # Infrastructure mismatch detection
+        if device_ip_mismatch == 1.0:
+            anomaly_vectors.append("infra_mismatch")
+        
+        # Policy violation detection
         if policy_violation == 1.0:
             anomaly_vectors.append("policy_violation")
-            decision = SentinelDecision.BLOCK
-        
-        # =================================================================
-        # CHALLENGE Conditions (if not already BLOCK)
-        # =================================================================
-        
-        if decision != SentinelDecision.BLOCK:
-            # Check keyboard anomaly
-            if keyboard_score > self._ML_SCORE_THRESHOLD:
-                anomaly_vectors.append("keystroke_anomaly")
-                decision = SentinelDecision.CHALLENGE
-            
-            # Check mouse anomaly
-            if mouse_score > self._ML_SCORE_THRESHOLD:
-                anomaly_vectors.append("mouse_anomaly")
-                decision = SentinelDecision.CHALLENGE
-            
-            # Check new device
-            if is_new_device == 1.0:
-                anomaly_vectors.append("new_device")
-                decision = SentinelDecision.CHALLENGE
-        
-        # =================================================================
-        # Aggregate Biometric Vectors
-        # =================================================================
-        
-        # Add keyboard feature attribution vectors
-        anomaly_vectors.extend(keyboard_vectors)
-        
-        # Add mouse feature attribution vectors
-        anomaly_vectors.extend(mouse_vectors)
         
         # =================================================================
         # Calculate Risk Score
         # =================================================================
         
-        # Risk score is the maximum of all input signals
+        # Velocity risk: normalize to 0-1 (500 mph = 1.0)
+        velocity_risk = min(geo_velocity / self.MAX_VELOCITY, 1.0)
+        
+        # Infrastructure risk: direct value
+        infra_risk = device_ip_mismatch
+        
+        # Policy risk: direct value
+        policy_risk = policy_violation
+        
+        # Device risk: direct value
+        device_risk = is_new_device * 0.5  # New device is 50% risk factor
+        
+        # Final risk score: maximum of all risk components
         risk_score = max(
-            geo_velocity / 1000.0,  # Normalize velocity (1000 mph = 1.0)
-            policy_violation,
-            is_new_device,
-            keyboard_score,
-            mouse_score
+            velocity_risk,
+            infra_risk,
+            policy_risk,
+            device_risk
         )
+        
         # Clamp to [0.0, 1.0]
         risk_score = min(max(risk_score, 0.0), 1.0)
+        
+        # =================================================================
+        # Decision Logic (STRICT THRESHOLDS)
+        # =================================================================
+        
+        if risk_score >= self.BLOCK_THRESHOLD:
+            decision = SentinelDecision.BLOCK
+        elif risk_score >= self.CHALLENGE_THRESHOLD:
+            decision = SentinelDecision.CHALLENGE
+        else:
+            decision = SentinelDecision.ALLOW
         
         return SentinelAnalysis(
             decision=decision,
@@ -131,3 +127,53 @@ class NavigatorPolicyEngine:
             engine_version=_ENGINE_VERSION,
             anomaly_vectors=anomaly_vectors
         )
+
+
+# =============================================================================
+# Session-Level Strike System (MANDATORY)
+# =============================================================================
+
+class MouseSessionTracker:
+    """
+    Tracks bot/human strokes within a session using a strike system.
+    
+    Rules:
+        - Bot stroke → strikes += 1
+        - Human stroke → strikes = max(0, strikes - 1)
+        - Session flagged if strikes >= 3
+    """
+    
+    STRIKE_THRESHOLD: int = 3
+    
+    def __init__(self) -> None:
+        """Initialize with zero strikes."""
+        self.strikes: int = 0
+        self.flagged: bool = False
+    
+    def record_bot_stroke(self) -> None:
+        """Record a bot-like stroke, incrementing strikes."""
+        self.strikes += 1
+        self._update_flag()
+    
+    def record_human_stroke(self) -> None:
+        """Record a human-like stroke, decrementing strikes (min 0)."""
+        self.strikes = max(0, self.strikes - 1)
+        self._update_flag()
+    
+    def _update_flag(self) -> None:
+        """Update flagged status based on strike count."""
+        if self.strikes >= self.STRIKE_THRESHOLD:
+            self.flagged = True
+    
+    def is_flagged(self) -> bool:
+        """Check if session is flagged as suspicious."""
+        return self.flagged
+    
+    def get_strikes(self) -> int:
+        """Get current strike count."""
+        return self.strikes
+    
+    def reset(self) -> None:
+        """Reset tracker state."""
+        self.strikes = 0
+        self.flagged = False
