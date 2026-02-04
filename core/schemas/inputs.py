@@ -58,6 +58,7 @@ class KeystrokePayload(BaseModel):
     Sent periodically by the client during a session.
     """
     session_id: str = Field(..., description="Active session identifier")
+    user_id: str = Field(..., description="Unique user identifier")
     sequence_id: int = Field(..., description="Sequence number for ordering batches")
     events: List[KeyboardEvent] = Field(..., description="Batch of keyboard events")
 
@@ -68,6 +69,7 @@ class MousePayload(BaseModel):
     Sent periodically by the client during a session.
     """
     session_id: str = Field(..., description="Active session identifier")
+    user_id: str = Field(..., description="Unique user identifier")
     sequence_id: int = Field(..., description="Sequence number for ordering batches")
     events: List[MouseEvent] = Field(..., description="Batch of mouse events")
 
@@ -140,3 +142,53 @@ class EvaluationRequest(BaseModel):
     user_session: UserSessionContext = Field(..., description="User and session context")
     business_context: BusinessContext = Field(..., description="Business action context")
     network_context: ClientNetworkContext = Field(..., description="Network/client context")
+
+
+# =============================================================================
+# New Orchestrator API Schemas (Per Security Spec)
+# =============================================================================
+
+class KeyboardStreamPayload(BaseModel):
+    """
+    Stream payload for keyboard events with anti-replay protection.
+    batch_id must be strictly sequential per session.
+    """
+    session_id: str = Field(..., description="Active session identifier")
+    user_id: str = Field(..., description="Unique user identifier")
+    batch_id: int = Field(..., ge=1, description="Strictly sequential batch ID (anti-replay)")
+    events: List[KeyboardEvent] = Field(..., description="Batch of keyboard events")
+
+
+class MouseStreamPayload(BaseModel):
+    """
+    Stream payload for mouse events with anti-replay protection.
+    batch_id must be strictly sequential per session.
+    """
+    session_id: str = Field(..., description="Active session identifier")
+    user_id: str = Field(..., description="Unique user identifier")
+    batch_id: int = Field(..., ge=1, description="Strictly sequential batch ID (anti-replay)")
+    events: List[MouseEvent] = Field(..., description="Batch of mouse events")
+
+
+class RequestContext(BaseModel):
+    """Request context for /evaluate endpoint."""
+    ip_address: str = Field(..., description="Client IP address")
+    user_agent: str = Field(..., description="Raw user agent string")
+    endpoint: str = Field(..., description="API endpoint being accessed")
+    method: str = Field(..., description="HTTP method (GET, POST, etc.)")
+    user_id: str = Field(..., description="Authenticated user identifier")
+
+
+class EvaluatePayload(BaseModel):
+    """
+    Payload for /evaluate endpoint with idempotency support.
+    eval_id enables replay protection for evaluate calls.
+    """
+    session_id: str = Field(..., description="Active session identifier")
+    request_context: RequestContext = Field(..., description="Request context")
+    business_context: BusinessContext = Field(..., description="Business action context")
+    role: str = Field(..., description="User role (e.g., analyst, admin)")
+    mfa_status: str = Field(..., description="MFA verification status")
+    session_start_time: float = Field(..., description="Session start timestamp (ms)")
+    client_fingerprint: Optional[ClientFingerprint] = Field(None, description="Client device fingerprint")
+    eval_id: Optional[str] = Field(None, description="Unique eval ID for idempotency")

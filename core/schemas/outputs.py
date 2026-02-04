@@ -114,25 +114,23 @@ class SecurityEnforcement(BaseModel):
 # Sentinel Response (Root Model)
 # =============================================================================
 
-class SentinelResponse(BaseModel):
-    """
-    Root response model for Sentinel risk assessment.
-    Enforces the complete JSON output contract.
-    """
-    actor: ActorContext = Field(..., description="User and session context")
-    event_id: str = Field(..., description="Unique event identifier")
-    timestamp: datetime = Field(..., description="Response timestamp (timezone-aware)")
-    environment: str = Field(..., description="Environment (e.g., production, staging)")
-    action_context: ActionContext = Field(..., description="Action being evaluated")
-    correlation_id: str = Field(..., description="Request correlation identifier")
-    network_context: NetworkContext = Field(..., description="Network context")
-    sentinel_analysis: SentinelAnalysis = Field(..., description="Risk analysis results")
-    security_enforcement: SecurityEnforcement = Field(..., description="Enforcement actions")
+# SentinelResponse removed (unused legacy output contract)
 
-    @field_validator("timestamp", mode="before")
-    @classmethod
-    def ensure_timezone_aware(cls, v: datetime) -> datetime:
-        """Ensure timestamp is timezone-aware."""
-        if isinstance(v, datetime) and v.tzinfo is None:
-            raise ValueError("timestamp must be timezone-aware")
-        return v
+
+# =============================================================================
+# Simplified Evaluate Response (Per New Spec)
+# =============================================================================
+
+class EvaluateResponse(BaseModel):
+    """
+    Simplified response for /evaluate endpoint.
+    
+    Returns only the essential decision information:
+    - decision: ALLOW, CHALLENGE, or BLOCK
+    - risk: Final fused risk score (0.0 to 1.0)
+    - mode: Current session mode (NORMAL or CHALLENGE)
+    """
+    decision: SentinelDecision = Field(..., description="Security decision")
+    risk: float = Field(..., ge=0.0, le=1.0, description="Final risk score")
+    mode: str = Field(..., description="Session mode (NORMAL or CHALLENGE)")
+

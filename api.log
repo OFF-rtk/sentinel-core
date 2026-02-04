@@ -1,0 +1,21 @@
+nohup: ignoring input
+INFO:     Started server process [544580]
+INFO:     Waiting for application startup.
+2026-02-04 19:33:01,170 - __main__ - INFO - Starting Sentinel Orchestrator API...
+2026-02-04 19:33:01,172 - persistence.connection - INFO - Successfully connected to Redis at localhost:6379
+2026-02-04 19:33:01,196 - persistence.model_store - INFO - ModelStore initialized with Supabase
+2026-02-04 19:33:01,196 - core.orchestrator - INFO - SentinelOrchestrator v3.1 initialized (Navigator Integrated)
+2026-02-04 19:33:01,196 - __main__ - INFO - Sentinel Orchestrator ready
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:55448 - "GET /health HTTP/1.1" 200 OK
+2026-02-04 19:33:41,166 - httpx - INFO - HTTP Request: GET https://tuzjqjfxzhfurqfhxzrb.supabase.co/rest/v1/user_behavior_models?select=model_blob%2Cfeature_window_count%2Cmodel_version%2Cchecksum&user_id=eq.curl_user_1&model_type=eq.keyboard_hst "HTTP/2 400 Bad Request"
+2026-02-04 19:33:41,168 - persistence.model_store - ERROR - Failed to load keyboard_hst for curl_user_1: {'message': 'invalid input syntax for type uuid: "curl_user_1"', 'code': '22P02', 'hint': None, 'details': None}
+[MODEL] KeyboardAnomalyModel initialized
+[MODEL]   n_trees=100, height=6, window_size=80
+[MODEL]   ANOMALY_THRESHOLD=0.6
+[PROCESSOR] Keystroke #1: a DOWN
+[PROCESSOR] Paired a: dwell=100.0ms
+INFO:     127.0.0.1:58490 - "POST /stream/keyboard HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:51706 - "POST /evaluate HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42252 - "POST /stream/mouse HTTP/1.1" 204 No Content

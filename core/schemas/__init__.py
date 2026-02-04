@@ -22,6 +22,14 @@ from core.schemas.inputs import (
     UserSessionContext,
 )
 
+# Input schemas - New orchestrator API
+from core.schemas.inputs import (
+    KeyboardStreamPayload,
+    MouseStreamPayload,
+    RequestContext,
+    EvaluatePayload,
+)
+
 # Output schemas
 from core.schemas.outputs import (
     ActionContext,
@@ -32,7 +40,7 @@ from core.schemas.outputs import (
     SecurityEnforcement,
     SentinelAnalysis,
     SentinelDecision,
-    SentinelResponse,
+    EvaluateResponse,
 )
 
 __all__ = [
@@ -41,14 +49,19 @@ __all__ = [
     "MouseEventType",
     "KeyboardEvent",
     "MouseEvent",
-    # Input - Async Payloads
+    # Input - Async Payloads (Legacy)
     "KeystrokePayload",
     "MousePayload",
-    # Input - Sync Evaluation
+    # Input - Sync Evaluation (Legacy)
     "UserSessionContext",
     "BusinessContext",
     "ClientNetworkContext",
     "EvaluationRequest",
+    # Input - New Orchestrator API
+    "KeyboardStreamPayload",
+    "MouseStreamPayload",
+    "RequestContext",
+    "EvaluatePayload",
     # Output
     "SentinelDecision",
     "ActorContext",
@@ -58,5 +71,5 @@ __all__ = [
     "NetworkContext",
     "SentinelAnalysis",
     "SecurityEnforcement",
-    "SentinelResponse",
+    "EvaluateResponse",
 ]

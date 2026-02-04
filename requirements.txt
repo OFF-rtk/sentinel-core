@@ -45,3 +45,6 @@ ua-parser-builtins==202602
 urllib3==2.6.3
 user-agents==2.2.0
 yarl==1.22.0
+fastapi>=0.115.0
+uvicorn>=0.32.0
+supabase>=2.0.0

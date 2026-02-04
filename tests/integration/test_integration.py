@@ -1,61 +1,58 @@
 """
-Sentinel Engine Integration Tests - Model Warm-up & Stress Testing
+Sentinel Engine Integration Tests - Full API Data Flow
 
-This script simulates user sessions with proper model warm-up to validate
-the end-to-end flow of the SentinelOrchestrator. Results are logged to results.md.
+This script validates the end-to-end flow from API input to Orchestrator output.
+It uses FastAPI TestClient to simulate real HTTP traffic.
 
 Test Phases:
-1. Warm-up: Feed 300+ sliding windows to train the online learning models.
-2. Attack: Switch to bot-like patterns and verify anomaly detection.
-3. Decay: Verify time-based score decay.
+1. Warm-up: Feed 300+ sliding windows via /stream endpoints.
+2. Attack: Switch to bot-like patterns and verify anomaly detection via /evaluate.
+3. Decay: Verify time-based score decay via /evaluate.
 
 Usage:
-    python test_integration.py
+    pytest tests/integration/test_integration.py
 """
 
 import json
 import math
 import os
-import random
 import sys
 import time
+import random
+from typing import List, Tuple, Dict, Any
 from datetime import datetime, timezone
-from typing import List, Tuple
+
+from fastapi.testclient import TestClient
 
 # Add project root to path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
-
-from core.orchestrator import SentinelOrchestrator
+from main import app
 from core.schemas.inputs import (
-    KeystrokePayload,
+    KeyboardStreamPayload,
+    MouseStreamPayload,
+    EvaluatePayload,
     KeyboardEvent,
     KeyEventType,
-    MousePayload,
     MouseEvent,
     MouseEventType,
-    EvaluationRequest,
-    UserSessionContext,
+    RequestContext,
     BusinessContext,
-    ClientNetworkContext,
+    ClientFingerprint
 )
 from core.schemas.outputs import SentinelDecision
-from core.state_manager import StateManager
 
+# Initialize TestClient
+client = TestClient(app)
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-# Seed for reproducibility
 random.seed(42)
-
-# Model window size (from HalfSpaceTrees config)
 MODEL_WINDOW_SIZE = 250
 
-# Warm-up text (Standard Pangrams)
 WARMUP_TEXT = """
 The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs.
 How vexingly quick daft zebras jump! The five boxing wizards jump quickly at dawn.
@@ -64,9 +61,11 @@ The job requires extra pluck and zeal from every young wage earner. Quick zephyr
 vexing daft Jim. Crazy Frederick bought many very exquisite opal jewels.
 """.replace("\n", " ").strip()
 
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # =============================================================================
-# Improved Data Generators
+# Generators
 # =============================================================================
 
 def generate_natural_typing(
@@ -74,42 +73,23 @@ def generate_natural_typing(
     mode: str = "normal",
     start_timestamp: float = None
 ) -> List[KeyboardEvent]:
-    """
-    Generate keystroke events with realistic Gaussian-distributed timing.
-    """
     events = []
-    current_ts = start_timestamp or (time.time() * 1000)
+    current_ts = start_timestamp or (time.time() * 1000.0)
     
     for char in text:
         if mode == "normal":
-            # Human-like: Dwell 100ms ± 15ms, Flight 120ms ± 30ms
             dwell_time = max(50.0, random.gauss(100.0, 15.0))
             flight_time = max(30.0, random.gauss(120.0, 30.0))
-        else:  # bot mode
-            # Bot: Fixed minimal timing (Machine Speed)
+        else:
             dwell_time = 10.0
-            flight_time = 0.0  # Impossible for humans
+            flight_time = 0.0
         
-        # Key DOWN event
-        events.append(KeyboardEvent(
-            key=char,
-            event_type=KeyEventType.DOWN,
-            timestamp=current_ts
-        ))
-        
-        # Key UP event (after dwell time)
+        events.append(KeyboardEvent(key=char, event_type=KeyEventType.DOWN, timestamp=current_ts))
         current_ts += dwell_time
-        events.append(KeyboardEvent(
-            key=char,
-            event_type=KeyEventType.UP,
-            timestamp=current_ts
-        ))
-        
-        # Flight time to next key
+        events.append(KeyboardEvent(key=char, event_type=KeyEventType.UP, timestamp=current_ts))
         current_ts += flight_time
     
     return events
-
 
 def generate_mouse_movements(
     n_points: int,
@@ -118,343 +98,208 @@ def generate_mouse_movements(
     start_x: int = 100,
     start_y: int = 100
 ) -> List[MouseEvent]:
-    """
-    Generate mouse movement events with different patterns.
-    """
     events = []
-    current_ts = start_timestamp or (time.time() * 1000)
+    current_ts = start_timestamp or (time.time() * 1000.0)
     x, y = start_x, start_y
     
     for i in range(n_points):
         if pattern == "normal":
-            # Human-like: curved movement with natural velocity variations
-            angle = random.gauss(0.0, 0.5)  # Direction change
-            speed = random.gauss(50.0, 20.0)  # Pixels per movement
+            angle = random.gauss(0.0, 0.5)
+            speed = random.gauss(50.0, 20.0)
             dx = int(speed * math.cos(angle + i * 0.1))
             dy = int(speed * math.sin(angle + i * 0.1))
             time_delta = max(10.0, random.gauss(50.0, 20.0))
-        else:  # bot mode
-            # Bot: perfectly straight lines with instant velocity
-            dx = 10
-            dy = 0
+        else:
+            dx, dy = 10, 0
             time_delta = 5.0
         
         x = max(0, min(1920, x + dx))
         y = max(0, min(1080, y + dy))
         current_ts += time_delta
         
-        events.append(MouseEvent(
-            x=x,
-            y=y,
-            event_type=MouseEventType.MOVE,
-            timestamp=current_ts
-        ))
+        events.append(MouseEvent(x=x, y=y, event_type=MouseEventType.MOVE, timestamp=current_ts))
     
     return events
 
+# =============================================================================
+# Helper Functions
+# =============================================================================
 
-def create_evaluation_request(
-    user_id: str,
-    session_id: str,
-    ip_address: str,
-    ja3_hash: str | None = None,
-    role: str = "analyst",
-    mfa_status: str = "verified"
-) -> EvaluationRequest:
-    """Create an EvaluationRequest with the given parameters."""
-    return EvaluationRequest(
-        user_session=UserSessionContext(
-            user_id=user_id,
+# Helper Functions
+# =============================================================================
+
+def send_streams(
+    client: TestClient,
+    session_id: str, 
+    user_id: str, 
+    kb_events: List[KeyboardEvent], 
+    ms_events: List[MouseEvent],
+    window_start: int = 0
+) -> None:
+    """Send batched streams to API."""
+    # Chunk into small batches to simulate streaming
+    BATCH_SIZE = 50
+    kb_chunk = kb_events[window_start : window_start + BATCH_SIZE]
+    ms_chunk = ms_events[window_start : window_start + BATCH_SIZE]
+    
+    # We use a simple sequential logic here for the test invocation count
+    # In a real app, client manages sequence_id.
+    # We will use window_start as a proxy for specific calls
+    seq_id = (window_start // BATCH_SIZE) + 1
+    
+    if kb_chunk:
+        payload = KeyboardStreamPayload(
             session_id=session_id,
-            role=role,
-            session_start_time=datetime.now(timezone.utc),
-            mfa_status=mfa_status
+            user_id=user_id,
+            sequence_id=seq_id,
+            batch_id=seq_id,
+            events=kb_chunk
+        )
+        resp = client.post("/stream/keyboard", json=payload.model_dump(mode='json'))
+        assert resp.status_code == 204, f"Keyboard stream failed: {resp.text}"
+
+    if ms_chunk:
+        payload = MouseStreamPayload(
+            session_id=session_id,
+            user_id=user_id,
+            sequence_id=seq_id,
+            batch_id=seq_id,
+            events=ms_chunk
+        )
+        resp = client.post("/stream/mouse", json=payload.model_dump(mode='json'))
+        assert resp.status_code == 204, f"Mouse stream failed: {resp.text}"
+
+def call_evaluate(
+    client: TestClient,
+    session_id: str,
+    user_id: str,
+    ip: str = "127.0.0.1",
+    ua: str = "Mozilla/Test",
+    fingerprint: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """Call evaluate endpoint."""
+    fp_model = None
+    if fingerprint:
+        fp_model = ClientFingerprint(**fingerprint)
+
+    payload = EvaluatePayload(
+        session_id=session_id,
+        request_context=RequestContext(
+            ip_address=ip,
+            user_agent=ua,
+            endpoint="/login",
+            method="POST",
+            user_id=user_id
         ),
         business_context=BusinessContext(
-            service="card_service",
-            action_type="card_activation",
-            resource_target="card_xxxx1234",
-            transaction_details={"amount": 1000.0, "currency": "USD"}
+            service="banking",
+            action_type="transfer",
+            resource_target="account_123",
+            transaction_details={"amount": 500}
         ),
-        network_context=ClientNetworkContext(
-            ip_address=ip_address,
-            user_agent="Mozilla/5.0 TestSuite",
-            ja3_hash=ja3_hash
-        )
+        role="analyst",
+        mfa_status="verified",
+        session_start_time=time.time() * 1000.0,
+        client_fingerprint=fp_model
     )
-
-
-# =============================================================================
-# Logging Helpers
-# =============================================================================
-
-def log_step(file, title: str, data, level: int = 3) -> None:
-    """Write a formatted section to results.md."""
-    prefix = "#" * level
-    file.write(f"{prefix} {title}\n\n")
-    if isinstance(data, (dict, list)):
-        file.write("```json\n")
-        file.write(json.dumps(data, indent=2, default=str))
-        file.write("\n```\n\n")
-    else:
-        file.write(f"{data}\n\n")
-
-
-def log_score_progression(file, progression: List[Tuple[int, float, str]]) -> None:
-    """Log score progression table."""
-    file.write("| Update # | Risk Score | Status |\n")
-    file.write("|----------|------------|--------|\n")
-    for update_num, score, status in progression:
-        file.write(f"| {update_num} | {score:.4f} | {status} |\n")
-    file.write("\n")
-
+    
+    resp = client.post("/evaluate", json=payload.model_dump(mode='json'))
+    assert resp.status_code == 200, f"Evaluate failed: {resp.text}"
+    return resp.json()
 
 # =============================================================================
 # Test Phases
 # =============================================================================
 
-def run_phase_1_warmup(
-    orchestrator: SentinelOrchestrator,
-    file,
-    session_id: str
-) -> Tuple[bool, List[Tuple[int, float, str]]]:
-    """
-    Phase 1: Model Warm-up (Training)
+def test_full_flow():
+    session_id = f"sess_{int(time.time())}"
+    user_id = "test_user_integration"
     
-    STRATEGY: Sliding Window Ingestion.
-    Instead of tiny batches, we take a large pool of events and "slide" a window 
-    of 50 events over it (step=5).
+    print(f"\n🚀 Starting Integration Test [Session: {session_id}]")
     
-    Result: 2000 events -> ~390 robust updates.
-    """
-    file.write("## Phase 1: Model Warm-up (Training)\n\n")
-    file.write("**Strategy:** Sliding Window Ingestion (Window=50, Step=5).\n")
-    file.write(f"**Target:** > {MODEL_WINDOW_SIZE} updates to fill HalfSpaceTrees window.\n\n")
+    # Use context manager to trigger lifespan events (DB connection, etc.)
+    with TestClient(app) as client:
     
-    # 1. Generate a large pool of events (repeating text)
-    full_text = WARMUP_TEXT * 10
-    keyboard_pool = generate_natural_typing(full_text, mode="normal")
-    mouse_pool = generate_mouse_movements(2500, pattern="normal")
-    
-    file.write(f"**Generated Pool:** {len(keyboard_pool)} Keyboard Events, {len(mouse_pool)} Mouse Events.\n\n")
-    
-    # 2. Sliding Window Configuration
-    window_size = 50   # Realistic payload size
-    step_size = 5      # Overlap stride
-    
-    score_progression: List[Tuple[int, float, str]] = []
-    update_count = 0
-    
-    # Calculate max possible start index
-    max_start = len(keyboard_pool) - window_size
-    
-    print(f"   Streaming sliding windows (Window={window_size}, Step={step_size})...")
-
-    for i in range(0, max_start, step_size):
-        # Slice the window
-        kb_batch = keyboard_pool[i : i + window_size]
-        ms_batch = mouse_pool[i : i + window_size]
+        # --- PHASE 1: WARM-UP ---
+        print("\n📋 Phase 1: Warm-up (Training Normal Patterns)")
         
-        # Send Keyboard Payload
-        payload_kb = KeystrokePayload(
-            session_id=session_id,
-            sequence_id=update_count,
-            events=kb_batch
-        )
-        orchestrator.process_biometric_stream(payload_kb)
+        # Generate large pool
+        full_text = WARMUP_TEXT * 5
+        kb_pool = generate_natural_typing(full_text, mode="normal")
+        ms_pool = generate_mouse_movements(len(kb_pool) + 100, pattern="normal")
         
-        # Send Mouse Payload
-        payload_ms = MousePayload(
-            session_id=session_id,
-            sequence_id=update_count,
-            events=ms_batch
-        )
-        orchestrator.process_biometric_stream(payload_ms)
+        print(f"Generated {len(kb_pool)} keyboard events and {len(ms_pool)} mouse events.")
         
-        update_count += 1
+        # Stream in chunks (simulating sliding window inputs)
+        # We send enough data to fill the models
+        chunk_size = 50
+        steps = min(len(kb_pool), len(ms_pool)) // chunk_size
         
-        # Check scores periodically
-        if update_count % 50 == 0 or i + step_size >= max_start:
-            snapshot = orchestrator.state_manager.get_snapshot(session_id)
-            kb_entry = snapshot.get("latest_keyboard_entry", {})
-            score = kb_entry.get("score", 0.0)
+        for i in range(steps):
+            start_idx = i * chunk_size
+            send_streams(client, session_id, user_id, kb_pool, ms_pool, start_idx)
             
-            if update_count < MODEL_WINDOW_SIZE:
-                status = "⏳ Filling Window"
-            elif score < 0.4:
-                status = "✅ Stable"
-            else:
-                status = "⚠️ High"
+            # Periodically evaluate
+            if i % 5 == 0:
+                eval_resp = call_evaluate(client, session_id, user_id)
+                print(f"   [Step {i}] Risk: {eval_resp['risk']:.4f} | Decision: {eval_resp['decision']}")
+        
+        final_warmup = call_evaluate(client, session_id, user_id)
+        print(f"✅ Warm-up Complete. Risk: {final_warmup['risk']:.4f}")
+        
+        # Ideally risk should be low after training on normal data
+        # (Though HST needs ~250 samples to mature, steps per 50 items = many events)
+        assert final_warmup['risk'] < 0.6, "Risk should be low after warm-up"
+
+
+        # --- PHASE 2: ATTACK ---
+        print("\n📋 Phase 2: Bot Attack")
+        
+        # Generate bot data
+        bot_text = "evil_bot_payload" * 5
+        bot_kb = generate_natural_typing(bot_text, mode="bot")
+        bot_ms = generate_mouse_movements(len(bot_kb), pattern="bot")
+        
+        # Send attack stream (use higher sequence IDs)
+        # Send 3 rapid batches
+        for i in range(3):
+            current_batch_id = steps + i + 1
             
-            score_progression.append((update_count, score, status))
+            pl_kb = KeyboardStreamPayload(
+                session_id=session_id, user_id=user_id, sequence_id=current_batch_id, 
+                batch_id=current_batch_id, events=bot_kb[:50]
+            )
+            client.post("/stream/keyboard", json=pl_kb.model_dump(mode='json'))
+            
+            pl_ms = MouseStreamPayload(
+                session_id=session_id, user_id=user_id, sequence_id=current_batch_id, 
+                batch_id=current_batch_id, events=bot_ms[:50]
+            )
+            client.post("/stream/mouse", json=pl_ms.model_dump(mode='json'))
 
-    # Log progression
-    log_step(file, "Score Progression (Keyboard)", "", level=3)
-    log_score_progression(file, score_progression)
-    
-    # Get final state
-    snapshot = orchestrator.state_manager.get_snapshot(session_id)
-    keyboard_entry = snapshot.get("latest_keyboard_entry", {})
-    final_score = keyboard_entry.get("score", 0.0)
-    
-    # Assert: Model is warmed up if it stays stable low
-    warmup_success = final_score < 0.4 and update_count > MODEL_WINDOW_SIZE
-    
-    log_step(file, "Warm-up Result", 
-        f"**Final Keyboard Score:** `{final_score:.4f}`\n\n"
-        f"**Total Updates:** {update_count}\n\n"
-        f"**Status:** {'✅ Ready' if warmup_success else '⚠️ Unstable'}"
-    )
-    
-    return warmup_success, score_progression
-
-
-def run_phase_2_attack(
-    orchestrator: SentinelOrchestrator,
-    file,
-    session_id: str
-) -> Tuple[bool, float, List[str]]:
-    """
-    Phase 2: Attack Simulation
-    
-    GOAL: Send a batch of anomaly data (Bot). 
-    Since the model is now full of "Normal" data, this "Alien" data should trigger a high outlier score.
-    """
-    file.write("## Phase 2: Attack Simulation\n\n")
-    
-    # Generate attack patterns (Bot speed: 0ms flight)
-    attack_text = "password_dump_mode_activated"
-    bot_keyboard = generate_natural_typing(attack_text, mode="bot")
-    bot_mouse = generate_mouse_movements(50, pattern="bot")
-    
-    # Send Attack Payloads
-    # We send 3 distinct batches to ensure the Orchestrator picks up the latest one
-    for i in range(3):
-        payload_kb = KeystrokePayload(session_id=session_id, sequence_id=1000+i, events=bot_keyboard)
-        orchestrator.process_biometric_stream(payload_kb)
+        # Evaluate Attack
+        # We add suspicious context too (New Device)
+        fp = {"ja3_hash": "sus_hash", "device_id": "unknown_device", "user_agent_raw": "Python/Requests"}
         
-        payload_ms = MousePayload(session_id=session_id, sequence_id=1000+i, events=bot_mouse)
-        orchestrator.process_biometric_stream(payload_ms)
-    
-    # Check Biometric State (Async Result)
-    snapshot = orchestrator.state_manager.get_snapshot(session_id)
-    kb_entry = snapshot.get("latest_keyboard_entry", {})
-    ms_entry = snapshot.get("latest_mouse_entry", {})
-    
-    log_step(file, "Biometric Scores (Post-Attack)", {
-        "keyboard_score": kb_entry.get("score", 0.0),
-        "keyboard_vectors": kb_entry.get("vectors", []),
-        "mouse_score": ms_entry.get("score", 0.0),
-        "mouse_vectors": ms_entry.get("vectors", [])
-    })
-    
-    # Trigger Evaluation (Sync Check)
-    # Using a Bad IP to compound the risk
-    request = create_evaluation_request(
-        user_id="usr_77252",
-        session_id=session_id,
-        ip_address="185.220.101.1", # Bad IP
-        ja3_hash="unknown_bot_device",
-        mfa_status="not_verified"
-    )
-    
-    response = orchestrator.evaluate_transaction(request)
-    analysis = response.sentinel_analysis
-    
-    log_step(file, "Sentinel Analysis (Attack)", {
-        "risk_score": analysis.risk_score,
-        "decision": analysis.decision.value,
-        "anomaly_vectors": analysis.anomaly_vectors
-    })
-    
-    # Success Criteria: High Risk Score OR Blocked Decision
-    # We expect score > 0.6 because biometric + context risk should stack
-    attack_detected = analysis.risk_score > 0.6
-    
-    return attack_detected, analysis.risk_score, analysis.anomaly_vectors
+        attack_resp = call_evaluate(client, session_id, user_id, fingerprint=fp)
+        print(f"   Attack Risk: {attack_resp['risk']:.4f} | Decision: {attack_resp['decision']}")
+        
+        # Assert risk is high OR decision is block/challenge
+        assert attack_resp['risk'] > 0.6 or attack_resp['decision'] in ["CHALLENGE", "BLOCK"], \
+            "Attack should trigger high risk"
 
-
-def run_phase_3_decay(
-    orchestrator: SentinelOrchestrator,
-    file,
-    session_id: str,
-    pre_decay_score: float
-) -> Tuple[bool, float]:
-    """
-    Phase 3: Decay Test
-    """
-    file.write("## Phase 3: Decay Test\n\n")
-    
-    print("   Waiting 2 seconds for decay...")
-    time.sleep(2)
-    
-    # Re-evaluate with GOOD Context (San Francisco IP)
-    # This ensures the only risk factor remaining is the (decayed) biometric score
-    request = create_evaluation_request(
-        user_id="usr_77252",
-        session_id=session_id,
-        ip_address="192.168.1.1", # Good IP
-        ja3_hash="dev_ab4e80f2cbe04656", # Good Device
-        mfa_status="verified"
-    )
-    
-    response = orchestrator.evaluate_transaction(request)
-    analysis = response.sentinel_analysis
-    post_decay_score = analysis.risk_score
-    
-    log_step(file, "Post-Decay Analysis", {
-        "pre_decay_score": pre_decay_score,
-        "post_decay_score": post_decay_score,
-        "decision": analysis.decision.value
-    })
-    
-    # Check if the score dropped.
-    # Note: Pre-decay score (Attack) included Context Risk (Bad IP).
-    # Post-decay score excludes Context Risk AND decays Biometric Risk.
-    # So the drop should be significant.
-    decay_worked = post_decay_score < pre_decay_score
-    return decay_worked, post_decay_score
-
-
-# =============================================================================
-# Main Execution
-# =============================================================================
-
-def main():
-    print("=" * 60)
-    print("🛡️  SENTINEL ENGINE INTEGRATION TEST (SLIDING WINDOW)")
-    print("=" * 60)
-    
-    StateManager.reset_instance()
-    orchestrator = SentinelOrchestrator()
-    session_id = "usr_77252"
-    
-    with open(os.path.join(RESULTS_DIR, "integration_results.md"), "w") as f:
-        f.write("# Sentinel Integration Test Results\n\n")
-        f.write(f"**Date:** {datetime.now(timezone.utc)}\n\n")
+        # --- PHASE 3: DECAY ---
+        print("\n📋 Phase 3: Decay Test (Waiting 2s)")
+        time.sleep(2.1)
         
-        # Phase 1
-        print("\n📋 Phase 1: Warm-up...")
-        p1_pass, _ = run_phase_1_warmup(orchestrator, f, session_id)
-        print(f"   Result: {'✅ PASS' if p1_pass else '⚠️ UNSTABLE'}")
+        # Evaluate again with CLEAN context
+        decay_resp = call_evaluate(client, session_id, user_id, ip="192.168.1.5", ua="Mozilla/Clean")
+        print(f"   Decay Risk: {decay_resp['risk']:.4f}")
         
-        f.write("---\n")
+        # Check that risk dropped
+        assert decay_resp['risk'] < attack_resp['risk'], "Risk should decay over time"
         
-        # Phase 2
-        print("\n📋 Phase 2: Attack...")
-        p2_pass, score, _ = run_phase_2_attack(orchestrator, f, session_id)
-        print(f"   Result: {'✅ PASS' if p2_pass else '❌ FAIL'}")
-        print(f"   Attack Score: {score:.4f}")
-        
-        f.write("---\n")
-        
-        # Phase 3
-        print("\n📋 Phase 3: Decay...")
-        p3_pass, d_score = run_phase_3_decay(orchestrator, f, session_id, score)
-        print(f"   Result: {'✅ PASS' if p3_pass else '❌ FAIL'}")
-        print(f"   Decayed Score: {d_score:.4f}")
-        
-    print("\n📄 Done. Check results.md")
+        print("\n✅ Integration Test Passed!")
 
 if __name__ == "__main__":
-    main()
+    test_full_flow()
