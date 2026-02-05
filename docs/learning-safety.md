@@ -13,11 +13,18 @@ Sentinel enforces a strict rule: **"Only learn from the best."**
 *Disclaimer: Selective Learning prioritizes security over recall and may slow personalization for edge users.*
 
 ### 1. The Gating Logic
-We only trigger a model update (`model.learn_one()`) if the session is **Verified Trusted**.
+We only trigger a model update (`model.learn_one()`) if the session meets strict criteria:
 
-$$ ShouldLearn = (TrustScore > 0.85) \land (NoAnomaliesInWindow) $$
+```
+ShouldLearn = (Mode == "NORMAL") ∧
+              (TrustScore ≥ 0.65) ∧
+              (NavigatorRisk < 0.5) ∧
+              (ConsecutiveAllows ≥ 5) ∧
+              (NotInColdStart) ∧
+              (ContextStable for 30s)
+```
 
-If the Trust Score drops below 0.85 (even just to 0.84), learning is immediately disabled for that user. This creates a "ratchet" effect: you can lose trust easily, but you can only define "normal" when you are essentially beyond suspicion.
+If the Trust Score drops below 0.65, learning is immediately disabled for that user. This creates a "ratchet" effect: you can lose trust easily, but you can only define "normal" when you are beyond suspicion.
 
 ### 2. Time-Delayed Commitment
 We do not persist model updates to the database immediately. Updates are kept in memory (Redis) during the session.

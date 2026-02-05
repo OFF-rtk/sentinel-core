@@ -55,9 +55,9 @@ The Orchestrator is the central controller. It:
 
 ### 3. Models (Intelligence)
 Statistical and ML models that analyze behavior.
-*   **Physics Models**: Detect impossible human movements (bots).
-*   **Anomaly Models**: Detect deviation from a user's historical baseline.
-*   **Pattern Models**: Detect rigid, scripted behaviors.
+*   **Physics Models** (`PhysicsMouseModel`): Deterministic detection of impossible human movements using tiered biomechanical thresholds. Zero ML, zero learning.
+*   **Anomaly Models** (`KeyboardAnomalyModel`): River Half-Space Trees for online anomaly detection on keystroke dynamics. Used for both generic "human" detection (HST) and per-user identity verification.
+*   **Navigator Policy Engine** (`NavigatorPolicyEngine`): Stateless rule engine for context-based risk (impossible travel, device mismatch, policy violations).
 
 ### 4. Persistence Layer (Memory)
 *   **Redis (Hot Storage)**: Stores the *current* session state, trust score, and temporal windows. We use Redis for its low latency and atomic operations, which are critical when multiple event streams arrive simultaneously.

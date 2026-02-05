@@ -28,6 +28,3 @@ dump.rdb
 # OS Junk
 .DS_Store
 Thumbs.db
-
-# Optional: Large Assets (Uncomment if you want to force download on deploy)
-# assets/GeoLite2-City.mmdb

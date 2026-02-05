@@ -20,7 +20,7 @@ Raw events (x, y, timestamp) are converted into statistical vectors.
 **File**: `core/models/`
 
 The feature vector is passed to multiple models in parallel.
-*   **Physics Check**: `PhysicsMouseModel.predict()` checks for hard limits.
+*   **Physics Check**: `PhysicsMouseModel.score_one()` checks for hard velocity, linearity, and timing limits using tiered detection.
 *   **Anomaly detection**: Online Anomaly Models (River Half-Space Trees) scores the vector against the generic "Human" cluster.
 *   **Identity verification**: If the user has a profile, their specific `River` model scores the vector.
 
@@ -38,12 +38,18 @@ The `Orchestrator` class manages the lifecycle.
 *   **Hot State**: The updated `SessionState` is written back to Redis (TTL ~30m).
 *   **Cold State**: If the session ends or hits a learning checkpoint, the updated Model parameters are serialized and saved to Supabase.
 
-## 6. Decision Output (Conceptual)
+## 6. Decision Output
 
 When `POST /evaluate` is called:
-1.  Read current Trust Score from Redis.
-2.  Compare against Thresholds (defined in config).
-    *   Score > 0.8: `ALLOW` (Mode: NORMAL)
-    *   Score < 0.5: `CHALLENGE` (Mode: HIGH_ALERT)
-    *   Score < 0.1: `BLOCK`
-3.  Return JSON response.
+1.  Retrieve session state (keyboard score, mouse score, trust score) from Redis.
+2.  Compute navigator risk via `NavigatorPolicyEngine.evaluate()`.
+3.  Apply Weighted MAX Fusion across all four components.
+4.  Compare **final risk** against mode-specific thresholds:
+
+    | Mode      | ALLOW         | CHALLENGE           | BLOCK        |
+    |-----------|---------------|---------------------|--------------||
+    | NORMAL    | risk < 0.50   | 0.50 ≤ risk < 0.85  | risk ≥ 0.85  |
+    | CHALLENGE | risk < 0.40   | 0.40 ≤ risk < 0.75  | risk ≥ 0.75  |
+
+5.  Update trust score using linear delta formula.
+6.  Return JSON: `{ "decision": "ALLOW|CHALLENGE|BLOCK", "risk": float, "mode": "NORMAL|CHALLENGE" }`
