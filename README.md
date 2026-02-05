@@ -35,7 +35,7 @@ Sentinel scales horizontally without sticky sessions while preserving strict con
 
 ---
 
-## 📁 Directory Structure
+## Directory Structure
 
 ```text
 sentinel-ml/
@@ -49,7 +49,7 @@ sentinel-ml/
 └── tests/              # Unit & integration tests
 ```
 
-## 🛡 Threat Model
+## Threat Model
 
 **Mitigates**
 - Automated bots (mouse teleportation, scripted input)
@@ -63,9 +63,9 @@ sentinel-ml/
 - MFA or password replacement
 - Surveillance or biometric tracking
 
-📘 Full threat analysis: [docs/threat-model.md](docs/threat-model.md)
+> Full threat analysis: [docs/threat-model.md](docs/threat-model.md)
 
-## 🧠 Decision Engine (High-Level)
+## Decision Engine (High-Level)
 Sentinel uses a time-variant risk orchestration model.
 Users are evaluated differently at second 1 vs minute 10.
 
@@ -76,16 +76,16 @@ Users are evaluated differently at second 1 vs minute 10.
 - Identity continuity checks
 - Weighted MAX risk fusion
 
-📘 Full lifecycle & flowcharts: [docs/decision-engine.md](docs/decision-engine.md)
+> Full lifecycle & flowcharts: [docs/decision-engine.md](docs/decision-engine.md)
 
-## 🛠 Tech Stack
+## Tech Stack
 - **Language**: Python 3.11
 - **Web**: FastAPI (async)
 - **ML**: River (online learning), NumPy (physics)
 - **Storage**: Redis (hot state), Supabase (long-term)
 - **DevOps**: Docker, GitHub Actions
 
-## 🚀 Quick Start
+## Quick Start
 ⚠️ *Sentinel is a research-grade prototype, not a production authentication replacement.*
 
 ### Prerequisites
@@ -117,22 +117,22 @@ uvicorn main:app --reload --port 8000
 ```
 API available at: `http://localhost:8000`
 
-## 📡 API Overview
+## API Overview
 - `/stream/*` — High-frequency async telemetry ingestion
 - `/evaluate` — Synchronous risk decision for sensitive actions
 
-📘 Full API reference: [docs/api.md](docs/api.md)
+> Full API reference: [docs/api.md](docs/api.md)
 
-## 🧪 Testing
+## Testing
 We use pytest for unit and integration testing.
 
 ```bash
 pytest
 ```
-📘 Testing strategy: [docs/testing.md](docs/testing.md)
+> Testing strategy: [docs/testing.md](docs/testing.md)
 
-## 📚 Documentation
+## Documentation
 For comprehensive documentation, including deep dives into the architecture, decision engine, and API contracts, please refer to the **[Documentation Hub](docs/README.md)**.
 
-## 📜 License
+## License
 Distributed under the MIT License. See LICENSE for details.
