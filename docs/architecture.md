@@ -5,17 +5,39 @@ Sentinel follows a **stateless processing / stateful storage** pattern designed 
 ## High-Level Layout
 
 ```mermaid
-graph TD
-    Client[Client Application] -->|Stream Events| LB[Load Balancer]
-    LB -->|HTTP POST| API[Sentinel API (Orchestrator)]
-    API -->|Read/Write State| Redis[(Redis State Store)]
-    API -->|Async Persistence| DB[(Supabase / Postgres)]
-    
-    subgraph "Sentinel Node"
-        API
-        Models[ML Models]
-        Processor[Event Processor]
+graph LR
+    %% 1. Styling Definitions (High Contrast)
+    classDef client fill:#333,stroke:#000,stroke-width:2px,color:#fff;
+    classDef logic fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000;
+    classDef storage fill:#fff,stroke:#333,stroke-width:2px,color:#000;
+
+    %% 2. Nodes & Structure
+    Client["Client / Browser SDK"]:::client
+
+    subgraph Orchestrator ["Sentinel Orchestrator (Stateless)"]
+        direction TB
+        %% Adding a non-visible spacer or just clear flow helps overlap
+        API["Sentinel API"]:::logic
+        
+        %% Grouping logic components
+        subgraph Logic [" "]
+            direction TB
+            Processor["Processors:<br/>Keyboard, Mouse, Context"]:::logic
+            Models["Decision Engines:<br/>Physics, HST, Identity, Trust"]:::logic
+        end
+        
+        API --> Processor
+        Processor --> Models
     end
+
+    %% 3. Connections
+    %% Thick arrows for main traffic
+    Client ==>|"POST /stream/*"| API
+    Client ==>|"POST /evaluate"| API
+
+    %% Dotted lines for persistence/state
+    API -.- Redis[(Redis)]:::storage
+    API -.- Supabase[(Supabase)]:::storage
 ```
 
 ## Core Components
