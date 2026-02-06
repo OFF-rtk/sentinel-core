@@ -41,6 +41,7 @@ jobs:
             -v --tb=short \
             --cov=core/models --cov=core/processors --cov=core/schemas \
             --cov-report=term-missing \
+            --cov-config=.coveragerc \
             --cov-fail-under=80
       
       - name: Upload coverage report
