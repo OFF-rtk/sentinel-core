@@ -34,6 +34,8 @@ jobs:
           pip install pytest pytest-cov python-dotenv
       
       - name: Run unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest tests/models/ tests/processors/ tests/schemas/ \
             -v --tb=short \
@@ -87,6 +89,7 @@ jobs:
       
       - name: Run integration tests
         env:
+          PYTHONPATH: ${{ github.workspace }}
           REDIS_HOST: localhost
           REDIS_PORT: 6379
           REDIS_PASSWORD: ci_test_password  # Matches service container password
