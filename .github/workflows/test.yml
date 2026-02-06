@@ -61,7 +61,9 @@ jobs:
     
     services:
       redis:
-        image: redis:7-alpine
+        image: bitnami/redis:7.2
+        env:
+          REDIS_PASSWORD: ci_test_password
         options: >-
           --health-cmd "redis-cli -a ci_test_password ping"
           --health-interval 10s
@@ -69,8 +71,6 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-        env:
-          REDIS_ARGS: "--requirepass ci_test_password"
 
     steps:
       - name: Checkout code
