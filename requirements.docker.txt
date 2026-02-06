@@ -1,0 +1,22 @@
+# Core API dependencies
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# ML and data processing
+river>=0.23.0
+numpy>=2.0.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Persistence
+redis>=5.0.0
+supabase>=2.0.0
+
+# Context processing
+geoip2>=4.0.0
+user-agents>=2.0.0
+
+# Type hints
+typing_extensions>=4.0.0

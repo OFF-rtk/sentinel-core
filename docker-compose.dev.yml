@@ -1,0 +1,17 @@
+# Development overrides - run with:
+# docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  sentinel-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Mount source code for hot reload
+      - ./main.py:/app/main.py:ro
+      - ./core:/app/core:ro
+      - ./persistence:/app/persistence:ro
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1

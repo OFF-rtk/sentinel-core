@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+*.egg-info/
+.eggs/
+
+# Testing
+tests/
+new_tests/
+.pytest_cache/
+.coverage
+.coveragerc
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Environment
+.env
+.env.*
+
+# Infrastructure (handled separately)
+infrastructure/
+
+# Artifacts
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
