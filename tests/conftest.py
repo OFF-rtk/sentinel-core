@@ -1,173 +1,215 @@
 """
-Sentinel Test Suite - Shared Pytest Fixtures
+Sentinel-ML Test Suite - Shared Fixtures
 
-This conftest.py provides fixtures for all test categories including:
-- Redis connection and cleanup for Navigator tests
-- GeoIP mocking utilities
-- Processor and engine instances
-
-Usage:
-    pytest tests/ -v -s
+This module provides common fixtures used across all test modules.
+Import these fixtures by simply including them as test function parameters.
 """
 
-import os
+import csv
 import pytest
-from contextlib import contextmanager
-from typing import Dict, Optional
-from unittest.mock import patch, MagicMock
+from pathlib import Path
 
-# =============================================================================
-# Path Helpers
-# =============================================================================
-
-def get_project_root() -> str:
-    """Get the absolute path to the project root."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-def get_tests_dir() -> str:
-    """Get the absolute path to the tests directory."""
-    return os.path.dirname(os.path.abspath(__file__))
-
-def get_assets_dir() -> str:
-    """Get the absolute path to the tests/assets directory."""
-    return os.path.join(get_tests_dir(), "assets")
-
-def get_results_dir() -> str:
-    """Get the absolute path to the tests/results directory."""
-    return os.path.join(get_tests_dir(), "results")
+from core.processors.keyboard import KeyboardProcessor
+from core.processors.mouse import MouseProcessor
+from core.models.keyboard import KeyboardAnomalyModel
+from core.models.mouse import PhysicsMouseModel, MouseSessionTracker
+from core.models.navigator import NavigatorPolicyEngine
+from core.schemas.inputs import KeyboardEvent, KeyEventType, MouseEvent, MouseEventType
 
 
 # =============================================================================
-# Redis Fixtures
+# Path Constants
 # =============================================================================
 
-@pytest.fixture(scope="session")
-def redis_client():
-    """
-    Session-scoped Redis client for integration tests.
-    
-    Requires Docker Redis to be running:
-        cd infrastructure/redis && docker compose up -d
-    """
-    import redis
-    
-    host = os.environ.get("REDIS_HOST", "localhost")
-    port = int(os.environ.get("REDIS_PORT", "6379"))
-    password = os.environ.get("REDIS_PASSWORD", "PASS")
-    
-    try:
-        client = redis.Redis(
-            host=host,
-            port=port,
-            password=password,
-            decode_responses=True,
-        )
-        client.ping()
-        yield client
-        client.close()
-    except redis.ConnectionError:
-        pytest.skip(f"Redis not available at {host}:{port}")
-
-
-@pytest.fixture
-def clean_redis(redis_client):
-    """
-    Function-scoped fixture that provides a clean Redis state.
-    Flushes the database after each test for isolation.
-    """
-    yield redis_client
-    redis_client.flushdb()
+ASSETS_DIR = Path(__file__).parent / "assets"
+HUMAN_KEYBOARD_CSV = ASSETS_DIR / "human_keyboard_recording.csv"
+HUMAN_MOUSE_CSV = ASSETS_DIR / "human_mouse_recording.csv"
 
 
 # =============================================================================
-# GeoIP Fixtures
-# =============================================================================
-
-@pytest.fixture(scope="session")
-def geoip_available() -> bool:
-    """Check if GeoIP database is available."""
-    geoip_path = os.path.join(get_project_root(), "assets", "GeoLite2-City.mmdb")
-    return os.path.exists(geoip_path)
-
-
-@pytest.fixture
-def mock_geoip():
-    """
-    Fixture that returns a context manager for mocking GeoIP responses.
-    
-    Usage:
-        def test_example(mock_geoip):
-            ip_responses = {
-                "8.8.8.8": {"latitude": 37.7749, "longitude": -122.4194, ...}
-            }
-            with mock_geoip(ip_responses):
-                # Your test code here
-                pass
-    """
-    @contextmanager
-    def _mock_geoip(ip_responses: Dict[str, dict]):
-        """
-        Create a mock GeoIP reader that returns specified responses.
-        
-        Args:
-            ip_responses: Dict mapping IP addresses to response dicts with:
-                - latitude: float
-                - longitude: float
-                - city_name: str (optional)
-                - country_iso: str (optional)
-        """
-        def create_mock_response(ip: str):
-            if ip not in ip_responses:
-                raise Exception(f"IP {ip} not in mock database")
-            
-            data = ip_responses[ip]
-            
-            mock_response = MagicMock()
-            mock_response.location.latitude = data.get("latitude", 0.0)
-            mock_response.location.longitude = data.get("longitude", 0.0)
-            
-            if "city_name" in data:
-                mock_response.city.name = data["city_name"]
-            else:
-                mock_response.city.name = "MockCity"
-            
-            if "country_iso" in data:
-                mock_response.country.iso_code = data["country_iso"]
-            else:
-                mock_response.country.iso_code = "US"
-            
-            return mock_response
-        
-        mock_reader = MagicMock()
-        mock_reader.city.side_effect = create_mock_response
-        
-        with patch("geoip2.database.Reader") as MockReader:
-            MockReader.return_value = mock_reader
-            yield mock_reader
-    
-    return _mock_geoip
-
-
-# =============================================================================
-# Processor & Engine Fixtures
+# Processor Fixtures
 # =============================================================================
 
 @pytest.fixture
-def context_processor(geoip_available):
-    """Create a NavigatorContextProcessor instance."""
-    from core.processors.context import NavigatorContextProcessor
-    return NavigatorContextProcessor()
+def keyboard_processor():
+    """Fresh KeyboardProcessor for each test."""
+    return KeyboardProcessor()
 
 
 @pytest.fixture
-def policy_engine():
-    """Create a NavigatorPolicyEngine instance."""
-    from core.models.navigator import NavigatorPolicyEngine
+def mouse_processor():
+    """Fresh MouseProcessor for each test."""
+    return MouseProcessor()
+
+
+# =============================================================================
+# Model Fixtures
+# =============================================================================
+
+@pytest.fixture
+def keyboard_model():
+    """Fresh KeyboardAnomalyModel for each test."""
+    return KeyboardAnomalyModel()
+
+
+@pytest.fixture
+def mouse_model():
+    """Fresh PhysicsMouseModel for each test."""
+    return PhysicsMouseModel()
+
+
+@pytest.fixture
+def mouse_session_tracker():
+    """Fresh MouseSessionTracker for each test."""
+    return MouseSessionTracker()
+
+
+@pytest.fixture
+def navigator_engine():
+    """Fresh NavigatorPolicyEngine for each test."""
     return NavigatorPolicyEngine()
 
 
+# =============================================================================
+# Human Data Fixtures
+# =============================================================================
+
 @pytest.fixture
-def state_repository(clean_redis):
-    """Create a SentinelStateRepository instance with clean Redis."""
-    from persistence.repository import SentinelStateRepository
-    return SentinelStateRepository()
+def human_keyboard_events():
+    """Load human keyboard recording from CSV."""
+    if not HUMAN_KEYBOARD_CSV.exists():
+        pytest.skip(f"Human keyboard recording not found: {HUMAN_KEYBOARD_CSV}")
+    
+    events = []
+    with open(HUMAN_KEYBOARD_CSV, newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            event_type = KeyEventType.DOWN if row['event_type'] == 'DOWN' else KeyEventType.UP
+            events.append(KeyboardEvent(
+                key=row['key'],
+                event_type=event_type,
+                timestamp=float(row['timestamp'])
+            ))
+    
+    return events
+
+
+@pytest.fixture
+def human_mouse_events():
+    """Load human mouse recording from CSV."""
+    if not HUMAN_MOUSE_CSV.exists():
+        pytest.skip(f"Human mouse recording not found: {HUMAN_MOUSE_CSV}")
+    
+    events = []
+    with open(HUMAN_MOUSE_CSV, newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            event_type = MouseEventType.CLICK if row['event_type'] == 'CLICK' else MouseEventType.MOVE
+            events.append(MouseEvent(
+                x=int(row['x']),
+                y=int(row['y']),
+                event_type=event_type,
+                timestamp=float(row['timestamp'])
+            ))
+    
+    return events
+
+
+# =============================================================================
+# Feature Extraction Fixtures
+# =============================================================================
+
+@pytest.fixture
+def human_keyboard_features(keyboard_processor, human_keyboard_events):
+    """Extract keyboard features from human recording."""
+    features_list = []
+    
+    for event in human_keyboard_events:
+        result = keyboard_processor.process_event(event)
+        if result is not None:
+            features_list.append(result)
+    
+    return features_list
+
+
+@pytest.fixture
+def human_mouse_features(mouse_processor, human_mouse_events):
+    """Extract mouse stroke features from human recording."""
+    features_list = []
+    
+    for event in human_mouse_events[:5000]:  # Limit for speed
+        result = mouse_processor.process_event(event)
+        if result is not None:
+            features_list.append(result)
+    
+    return features_list
+
+
+# =============================================================================
+# Bot Pattern Generators
+# =============================================================================
+
+@pytest.fixture
+def bot_keyboard_constant():
+    """Bot keyboard features: perfect timing, zero variance."""
+    return {
+        "dwell_time_mean": 100.0,
+        "dwell_time_std": 0.5,
+        "flight_time_mean": 50.0,
+        "flight_time_std": 0.5,
+        "error_rate": 0.0
+    }
+
+
+@pytest.fixture
+def bot_keyboard_fast():
+    """Bot keyboard features: impossibly fast typing."""
+    return {
+        "dwell_time_mean": 1.0,
+        "dwell_time_std": 0.1,
+        "flight_time_mean": 1.0,
+        "flight_time_std": 0.1,
+        "error_rate": 0.0
+    }
+
+
+@pytest.fixture
+def bot_mouse_teleport():
+    """Bot mouse features: teleport speed (Tier 1 fail)."""
+    return {
+        "velocity_mean": 5.0,
+        "velocity_std": 1.0,
+        "velocity_max": 15.0,
+        "path_distance": 200.0,
+        "linearity_error": 5.0,
+        "time_diff_std": 10.0,
+        "segment_count": 20,
+    }
+
+
+@pytest.fixture
+def bot_mouse_perfect_line():
+    """Bot mouse features: impossibly straight line (Tier 1 fail)."""
+    return {
+        "velocity_mean": 2.0,
+        "velocity_std": 0.5,
+        "velocity_max": 3.0,
+        "path_distance": 350.0,
+        "linearity_error": 0.1,
+        "time_diff_std": 5.0,
+        "segment_count": 25,
+    }
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def make_keyboard_event(key: str, event_type: KeyEventType, timestamp: float) -> KeyboardEvent:
+    """Helper to create KeyboardEvent."""
+    return KeyboardEvent(key=key, event_type=event_type, timestamp=timestamp)
+
+
+def make_mouse_event(x: int, y: int, event_type: MouseEventType, timestamp: float) -> MouseEvent:
+    """Helper to create MouseEvent."""
+    return MouseEvent(x=x, y=y, event_type=event_type, timestamp=timestamp)
