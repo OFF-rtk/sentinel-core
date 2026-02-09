@@ -107,12 +107,6 @@ uvicorn main:app --reload --port 8000
 ```
 API available at: `http://localhost:8000`
 
-## Production Deployment
-
-The Sentinel API is deployed on Render:
-
-**Live URL:** https://sentinel-core-5d4i.onrender.com
-
 ## API Overview
 - `/stream/*` — High-frequency async telemetry ingestion
 - `/evaluate` — Synchronous risk decision for sensitive actions
