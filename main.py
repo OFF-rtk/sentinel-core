@@ -97,6 +97,13 @@ async def health_check():
     return {"status": "healthy", "version": "2.0.0"}
 
 
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect root to API documentation."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
+
 # =============================================================================
 # Stream Endpoints (HTTP 204)
 # =============================================================================
