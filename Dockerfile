@@ -29,6 +29,7 @@ COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 # Copy application code
 COPY core/ core/
 COPY persistence/ persistence/
+COPY assets/ assets/
 COPY main.py .
 
 # Create non-root user for security
