@@ -60,12 +60,6 @@ jobs:
     needs: unit-tests  # Only run if unit tests pass
     
     steps:
-      - name: Start Redis with password
-        run: |
-          docker run -d --name redis-ci -p 6379:6379 redis:7.2-alpine redis-server --requirepass PASS
-          sleep 2
-          docker exec redis-ci redis-cli -a PASS ping
-
       - name: Checkout code
         uses: actions/checkout@v4
       
@@ -84,9 +78,7 @@ jobs:
       - name: Run integration tests
         env:
           PYTHONPATH: ${{ github.workspace }}
-          REDIS_HOST: localhost
-          REDIS_PORT: 6379
-          REDIS_PASSWORD: PASS
+          REDIS_URL: ${{ secrets.REDIS_URL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |

@@ -44,7 +44,6 @@ sentinel-ml/
 │   ├── processors/     # Feature extraction
 │   └── orchestrator.py # Risk fusion
 ├── persistence/        # State & model storage
-├── infrastructure/     # Redis + Docker config
 ├── main.py             # FastAPI entrypoint
 └── tests/              # Unit & integration tests
 ```
@@ -82,7 +81,7 @@ Users are evaluated differently at second 1 vs minute 10.
 - **Language**: Python 3.11
 - **Web**: FastAPI (async)
 - **ML**: River (online learning), NumPy (physics)
-- **Storage**: Redis (hot state), Supabase (long-term)
+- **Storage**: Redis (hot state via Upstash), Supabase (long-term)
 - **DevOps**: Docker, GitHub Actions
 
 ## Quick Start
@@ -96,18 +95,9 @@ Users are evaluated differently at second 1 vs minute 10.
 Create a `.env` file in the project root:
 
 ```env
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=secret
+REDIS_URL=rediss://default:your-password@your-instance.upstash.io:6379
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-service-role-key
-```
-
-### Launch Infrastructure
-```bash
-cd infrastructure/redis
-docker-compose up -d
-cd ../..
 ```
 
 ### Start the Engine
