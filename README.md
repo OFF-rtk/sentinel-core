@@ -100,12 +100,18 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-service-role-key
 ```
 
-### Start the Engine
+### Start the Engine (Development)
 ```bash
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 API available at: `http://localhost:8000`
+
+## Production Deployment
+
+The Sentinel API is deployed on Render:
+
+**Live URL:** https://sentinel-core-5d4i.onrender.com
 
 ## API Overview
 - `/stream/*` — High-frequency async telemetry ingestion
