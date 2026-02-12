@@ -345,11 +345,13 @@ class NavigatorContextProcessor:
         """
         Check if device is new (unknown device_id).
         
-        Returns 1.0 if new device, 0.0 if known.
+        Returns 1.0 if new device, 0.0 if known or indeterminate.
         """
         if device_id is None:
-            # No device_id means we can't verify - treat as new
-            return 1.0
+            # No device_id means fingerprinting is not available.
+            # Treat as neutral (0.0) to avoid permanent CHALLENGE loop
+            # for clients that don't send client_fingerprint.
+            return 0.0
         
         if device_id not in known_devices:
             return 1.0

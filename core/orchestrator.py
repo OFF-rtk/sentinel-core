@@ -151,22 +151,28 @@ class SentinelOrchestrator:
         session = self.repo.get_or_create_session(payload.session_id)
         keyboard_state = self.repo.get_keyboard_state(payload.session_id)
         
-        # Validate batch_id
-        expected_batch_id = session.last_keyboard_batch_id + 1
-        
-        if payload.batch_id < expected_batch_id:
+        # Validate batch_id (high-water-mark — tolerates out-of-order proxy delivery)
+        if payload.batch_id <= session.last_keyboard_batch_id:
             raise ReplayAttackError(
-                f"Duplicate batch: received {payload.batch_id}, expected >= {expected_batch_id}"
+                f"Duplicate/old batch: received {payload.batch_id}, "
+                f"last accepted was {session.last_keyboard_batch_id}"
             )
         
-        if payload.batch_id > expected_batch_id + 3:
+        gap = payload.batch_id - session.last_keyboard_batch_id
+        if gap > 10:
             logger.warning(
-                f"Batch gap detected: expected {expected_batch_id}, got {payload.batch_id}"
+                f"Large keyboard batch gap: last={session.last_keyboard_batch_id}, "
+                f"got={payload.batch_id} (gap={gap})"
             )
             keyboard_state = KeyboardState()
             session.strikes += 0.5
             session.keyboard_window_count = 0
             session.keyboard_first_window_ts = 0.0
+        elif gap > 1:
+            logger.info(
+                f"Out-of-order keyboard batch accepted: expected {session.last_keyboard_batch_id + 1}, "
+                f"got {payload.batch_id} (gap={gap})"
+            )
         
         # Reconstruct processor
         processor = KeyboardProcessor()
@@ -248,19 +254,26 @@ class SentinelOrchestrator:
         session = self.repo.get_or_create_session(payload.session_id)
         mouse_state = self.repo.get_mouse_state(payload.session_id)
         
-        expected_batch_id = session.last_mouse_batch_id + 1
-        
-        if payload.batch_id < expected_batch_id:
+        # Validate batch_id (high-water-mark — tolerates out-of-order proxy delivery)
+        if payload.batch_id <= session.last_mouse_batch_id:
             raise ReplayAttackError(
-                f"Duplicate batch: received {payload.batch_id}, expected >= {expected_batch_id}"
+                f"Duplicate/old mouse batch: received {payload.batch_id}, "
+                f"last accepted was {session.last_mouse_batch_id}"
             )
         
-        if payload.batch_id > expected_batch_id + 3:
+        gap = payload.batch_id - session.last_mouse_batch_id
+        if gap > 10:
             logger.warning(
-                f"Mouse batch gap: expected {expected_batch_id}, got {payload.batch_id}"
+                f"Large mouse batch gap: last={session.last_mouse_batch_id}, "
+                f"got={payload.batch_id} (gap={gap})"
             )
             mouse_state = MouseState()
             session.strikes += 0.5
+        elif gap > 1:
+            logger.info(
+                f"Out-of-order mouse batch accepted: expected {session.last_mouse_batch_id + 1}, "
+                f"got {payload.batch_id} (gap={gap})"
+            )
         
         processor = MouseProcessor()
         for event_dict in mouse_state.pending_events:
