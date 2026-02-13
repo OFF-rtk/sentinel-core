@@ -63,7 +63,7 @@ class NavigatorContextProcessor:
             logger.warning(f"GeoIP database unavailable, using defaults: {e}")
             self.geoip = None
     
-    def process(self, request: EvaluationRequest) -> Dict[str, float]:
+    def process(self, request: EvaluationRequest) -> Dict[str, Any]:
         """
         Process evaluation request and derive all context metrics.
         
@@ -71,7 +71,7 @@ class NavigatorContextProcessor:
             request: The incoming evaluation request with user/network context
             
         Returns:
-            Dictionary of metric names to float values:
+            Dictionary of metric names to values:
             - geo_velocity_mph: Travel speed between last and current location
             - time_since_last_seen: Seconds since last activity
             - device_ip_mismatch: 1.0 if Desktop UA + VPN/hosting ASN
@@ -79,6 +79,7 @@ class NavigatorContextProcessor:
             - simultaneous_sessions: Count of active sessions
             - policy_violation: 1.0 if role violates resource access
             - ip_reputation: Risk score based on IP type
+            - current_geo_data: Raw geo dict {city, country, coords, asn_type}
         """
         user_id = request.user_session.user_id
         current_time = time.time()
@@ -95,7 +96,7 @@ class NavigatorContextProcessor:
         device_id = self._get_device_id(request)
         
         # Calculate all metrics
-        metrics: Dict[str, float] = {
+        metrics: Dict[str, Any] = {
             "geo_velocity_mph": self._calc_geo_velocity(
                 history.get("last_geo_coords"),
                 current_geo.get("coords"),
@@ -123,6 +124,12 @@ class NavigatorContextProcessor:
                 current_geo.get("asn_type", "unknown"),
                 0.3
             ),
+            # Raw geo data for persistence (used by orchestrator/TOFU)
+            "current_geo_data": {
+                "city": current_geo.get("city", "Unknown"),
+                "country": current_geo.get("country", "XX"),
+                "coords": current_geo.get("coords"),
+            },
         }
         
         return metrics

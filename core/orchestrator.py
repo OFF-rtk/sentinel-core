@@ -174,11 +174,25 @@ class SentinelOrchestrator:
                 f"got {payload.batch_id} (gap={gap})"
             )
         
-        # Reconstruct processor
+        # Reconstruct processor from pending events, capturing any windows
+        # that trigger during replay (e.g. when cumulative count hits 50)
         processor = KeyboardProcessor()
-        for event_dict in keyboard_state.pending_events:
+        replay_window_idx = -1  # Track last window position in pending
+        features_list = []
+        
+        for idx, event_dict in enumerate(keyboard_state.pending_events):
             event = KeyboardEvent(**event_dict)
-            processor.process_event(event)
+            features = processor.process_event(event)
+            if features is not None:
+                features_list.append((features, event_dict.get("timestamp", 0)))
+                replay_window_idx = idx
+        
+        # If replay produced windows, trim pending to only keep events after
+        # the last window (those events haven't been consumed yet)
+        if replay_window_idx >= 0:
+            keyboard_state.pending_events = keyboard_state.pending_events[replay_window_idx + 1:]
+            logger.info(f"Replay produced {len(features_list)} window(s), "
+                        f"{len(keyboard_state.pending_events)} events remain pending")
         
         # Load HST model for scoring (Uses payload.user_id)
         stored_hst = self.model_store.load_model(payload.user_id, ModelType.HST)
@@ -188,9 +202,8 @@ class SentinelOrchestrator:
             hst_model = KeyboardAnomalyModel()
         
         # Process new events
-        new_pending = []
+        new_pending = list(keyboard_state.pending_events)  # Start from trimmed pending
         last_event_ts = keyboard_state.last_event_ts
-        features_list = []
         now = time.time() * 1000.0  # Milliseconds
         
         for event in payload.events:
@@ -377,6 +390,14 @@ class SentinelOrchestrator:
         nav_analysis = self.policy_engine.evaluate(nav_metrics)
         navigator_risk = nav_analysis.risk_score
         
+        # ===== TOFU: Trust On First Use =====
+        user_id = payload.request_context.user_id
+        trusted_context = self.context_processor.repo.get_trusted_context(user_id)
+        
+        if trusted_context is None and navigator_risk == 0.5:
+            logger.info(f"TOFU: First session for {user_id}. Trusting explicitly.")
+            navigator_risk = 0.0
+        
         # Update context change tracking
         if navigator_risk >= 0.5:
             session.last_context_change_ts = now
@@ -405,7 +426,8 @@ class SentinelOrchestrator:
             return self._finalize_evaluate(
                 payload, session, SentinelDecision.BLOCK, 1.0,
                 keyboard_state, navigator_risk, identity_risk,
-                identity_confidence, cold_start_identity, stored_model
+                identity_confidence, cold_start_identity, stored_model,
+                nav_metrics=nav_metrics
             )
         
         # ===== Hard block priority =====
@@ -416,7 +438,8 @@ class SentinelOrchestrator:
             return self._finalize_evaluate(
                 payload, session, SentinelDecision.BLOCK, 1.0,
                 keyboard_state, navigator_risk, identity_risk,
-                identity_confidence, cold_start_identity, stored_model
+                identity_confidence, cold_start_identity, stored_model,
+                nav_metrics=nav_metrics
             )
         
         # Navigator hard block (Engine Decision)
@@ -427,7 +450,8 @@ class SentinelOrchestrator:
                 payload, session, SentinelDecision.BLOCK, 1.0,
                 keyboard_state, navigator_risk, identity_risk,
                 identity_confidence, cold_start_identity, stored_model,
-                skip_strike_update=False 
+                skip_strike_update=False,
+                nav_metrics=nav_metrics
             )
         
         # Identity contradiction (mature model)
@@ -437,7 +461,8 @@ class SentinelOrchestrator:
             return self._finalize_evaluate(
                 payload, session, SentinelDecision.BLOCK, 1.0,
                 keyboard_state, navigator_risk, identity_risk,
-                identity_confidence, cold_start_identity, stored_model
+                identity_confidence, cold_start_identity, stored_model,
+                nav_metrics=nav_metrics
             )
         
         # Immature identity guard (soft CHALLENGE)
@@ -447,7 +472,8 @@ class SentinelOrchestrator:
             return self._finalize_evaluate(
                 payload, session, SentinelDecision.CHALLENGE, identity_risk,
                 keyboard_state, navigator_risk, identity_risk,
-                identity_confidence, cold_start_identity, stored_model
+                identity_confidence, cold_start_identity, stored_model,
+                nav_metrics=nav_metrics
             )
         
         # ===== Trusted session modifiers =====
@@ -489,7 +515,8 @@ class SentinelOrchestrator:
             keyboard_state, navigator_risk, identity_risk,
             identity_confidence, cold_start_identity, stored_model,
             hysteresis_allows=hysteresis_allows,
-            hysteresis_time=hysteresis_time
+            hysteresis_time=hysteresis_time,
+            nav_metrics=nav_metrics
         )
     
     # -------------------------------------------------------------------------
@@ -743,7 +770,8 @@ class SentinelOrchestrator:
         stored_model: Optional[StoredModel],
         skip_strike_update: bool = False,
         hysteresis_allows: int = CHALLENGE_HYSTERESIS_ALLOWS,
-        hysteresis_time: float = CHALLENGE_HYSTERESIS_TIME
+        hysteresis_time: float = CHALLENGE_HYSTERESIS_TIME,
+        nav_metrics: Optional[Dict] = None
     ) -> EvaluateResponse:
         """Finalize evaluation and persist state."""
         now = time.time() * 1000.0
@@ -795,6 +823,18 @@ class SentinelOrchestrator:
                     lambda: KeyboardAnomalyModel(),
                     len(windows_to_learn)
                 )
+        
+        # ===== Persist Trusted Context (TOFU Write-Behind) =====
+        if (decision == SentinelDecision.ALLOW and
+                session.mode == "NORMAL" and
+                payload.client_fingerprint):
+            geo_data = nav_metrics.get("current_geo_data") if nav_metrics else None
+            self.context_processor.repo.save_trusted_context(
+                user_id=user_id,
+                device_id=payload.client_fingerprint.device_id,
+                ip=payload.request_context.ip_address,
+                geo=geo_data
+            )
         
         # Mark identity ready
         if decision == SentinelDecision.ALLOW and not session.identity_ready:

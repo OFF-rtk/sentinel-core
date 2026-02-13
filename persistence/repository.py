@@ -11,11 +11,13 @@ Key Schemas:
 """
 
 import json
+import os
 import time
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from redis.exceptions import RedisError
+from supabase import create_client, Client
 from .connection import get_redis_client
 
 
@@ -37,8 +39,131 @@ class SentinelStateRepository:
     SESSION_TTL: int = 86400
     
     def __init__(self) -> None:
-        """Initialize repository with Redis client."""
+        """Initialize repository with Redis and Supabase clients."""
         self.client = get_redis_client()
+        
+        # Supabase for persistent user_context (TOFU)
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
+        if url and key:
+            self.supabase: Optional[Client] = create_client(url, key)
+        else:
+            logger.warning("Supabase credentials not configured, TOFU persistence disabled")
+            self.supabase = None
+    
+    # -------------------------------------------------------------------------
+    # Trusted Context (TOFU — Read-Through / Write-Behind)
+    # -------------------------------------------------------------------------
+    
+    def get_trusted_context(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Read-through: Redis first, then Supabase fallback.
+        
+        Returns None if no history exists (signals TOFU condition).
+        Returns dict with known_devices, last_ip, last_geo_data if found.
+        """
+        # 1. Try Redis first
+        devices_key = self._devices_key(user_id)
+        try:
+            devices = self.client.smembers(devices_key)
+            if devices:
+                device_list = [
+                    d.decode("utf-8") if isinstance(d, bytes) else d
+                    for d in devices
+                ]
+                return {"known_devices": device_list, "source": "redis"}
+        except RedisError as e:
+            logger.warning(f"Redis read failed for trusted context {user_id}: {e}")
+        
+        # 2. Fallback to Supabase
+        if self.supabase is None:
+            return None
+        
+        try:
+            response = self.supabase.table("user_context").select(
+                "known_devices, last_ip, last_geo_data"
+            ).eq("user_id", user_id).execute()
+            
+            if not response.data:
+                return None  # No history → TOFU condition
+            
+            row = response.data[0]
+            known_devices = row.get("known_devices") or []
+            
+            if not known_devices:
+                return None  # Empty devices array → still TOFU
+            
+            # 3. Backfill Redis (cache warming)
+            try:
+                if known_devices:
+                    self.client.sadd(devices_key, *known_devices)
+                    logger.info(f"Cache warmed {len(known_devices)} devices for {user_id}")
+            except RedisError as e:
+                logger.warning(f"Redis backfill failed for {user_id}: {e}")
+            
+            return {
+                "known_devices": known_devices,
+                "last_ip": row.get("last_ip"),
+                "last_geo_data": row.get("last_geo_data"),
+                "source": "supabase",
+            }
+            
+        except Exception as e:
+            logger.error(f"Supabase read failed for trusted context {user_id}: {e}")
+            return None
+    
+    def save_trusted_context(
+        self,
+        user_id: str,
+        device_id: str,
+        ip: str,
+        geo: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Write-behind: persist allowed environment to Supabase + Redis.
+        
+        Called after an ALLOW decision to persist the trusted context.
+        """
+        # 1. Supabase upsert
+        if self.supabase is not None:
+            try:
+                # Read current row to append device
+                response = self.supabase.table("user_context").select(
+                    "known_devices"
+                ).eq("user_id", user_id).execute()
+                
+                if response.data:
+                    existing_devices = response.data[0].get("known_devices") or []
+                    if device_id not in existing_devices:
+                        existing_devices.append(device_id)
+                    
+                    self.supabase.table("user_context").update({
+                        "known_devices": existing_devices,
+                        "last_ip": ip,
+                        "last_geo_data": geo or {},
+                        "updated_at": "now()",
+                    }).eq("user_id", user_id).execute()
+                else:
+                    self.supabase.table("user_context").insert({
+                        "user_id": user_id,
+                        "known_devices": [device_id] if device_id else [],
+                        "last_ip": ip,
+                        "last_geo_data": geo or {},
+                    }).execute()
+                
+                logger.info(f"Persisted trusted context for {user_id}")
+                
+            except Exception as e:
+                logger.error(f"Supabase write failed for trusted context {user_id}: {e}")
+        
+        # 2. Redis write (immediate cache update)
+        if device_id:
+            devices_key = self._devices_key(user_id)
+            try:
+                self.client.sadd(devices_key, device_id)
+                self._cap_known_devices(user_id)
+            except RedisError as e:
+                logger.warning(f"Redis device write failed for {user_id}: {e}")
     
     def _profile_key(self, user_id: str) -> str:
         """Get profile hash key."""
