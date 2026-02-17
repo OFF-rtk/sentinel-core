@@ -129,8 +129,12 @@ class EvaluateResponse(BaseModel):
     - decision: ALLOW, CHALLENGE, or BLOCK
     - risk: Final fused risk score (0.0 to 1.0)
     - mode: Current session mode (NORMAL or CHALLENGE)
+    - ban_expires_in_seconds: Remaining ban TTL (only present when blacklisted)
     """
     decision: SentinelDecision = Field(..., description="Security decision")
     risk: float = Field(..., ge=0.0, le=1.0, description="Final risk score")
     mode: str = Field(..., description="Session mode (NORMAL or CHALLENGE)")
+    ban_expires_in_seconds: Optional[int] = Field(
+        None, description="Remaining ban time in seconds (present only on BLOCK from blacklist)"
+    )
 

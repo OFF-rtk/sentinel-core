@@ -339,11 +339,13 @@ class SentinelOrchestrator:
         
         session = self.repo.get_session(payload.session_id)
         if session is None:
+            logger.warning(f"[EVAL DEBUG] Session {payload.session_id} NOT FOUND in Redis. Returning CHALLENGE 0.5 early.")
             return EvaluateResponse(
                 decision=SentinelDecision.CHALLENGE,
                 risk=0.5,
                 mode="NORMAL"
             )
+        logger.info(f"[EVAL DEBUG] Session found: mode={session.mode}, trust={session.trust_score:.3f}, strikes={session.strikes}, consecutive_allows={session.consecutive_allows}")
         
         now = time.time() * 1000.0  # Milliseconds
         self.repo.refresh_session_ttl(payload.session_id)
@@ -353,6 +355,7 @@ class SentinelOrchestrator:
         
         keyboard_risk_raw = keyboard_state.last_score
         mouse_risk = mouse_state.last_score
+        logger.info(f"[EVAL DEBUG] Raw scores: keyboard={keyboard_risk_raw:.4f}, mouse={mouse_risk:.4f}, kb_windows={session.keyboard_window_count}")
         
         # ===== Navigator Risk =====
         # 1. Build EvaluationRequest
@@ -389,11 +392,13 @@ class SentinelOrchestrator:
         # 3. Assess Decision
         nav_analysis = self.policy_engine.evaluate(nav_metrics)
         navigator_risk = nav_analysis.risk_score
+        logger.info(f"[EVAL DEBUG] Navigator: risk={navigator_risk:.4f}, decision={nav_analysis.decision}")
         
         # ===== TOFU: Trust On First Use =====
         user_id = payload.request_context.user_id
         trusted_context = self.context_processor.repo.get_trusted_context(user_id)
         
+        logger.info(f"[EVAL DEBUG] TOFU check: trusted_context={'EXISTS' if trusted_context else 'NONE'}, navigator_risk={navigator_risk:.4f}")
         if trusted_context is None and navigator_risk == 0.5:
             logger.info(f"TOFU: First session for {user_id}. Trusting explicitly.")
             navigator_risk = 0.0
@@ -409,16 +414,19 @@ class SentinelOrchestrator:
         keyboard_risk = self._apply_keyboard_confidence(
             keyboard_risk_raw, session, now
         )
+        logger.info(f"[EVAL DEBUG] After confidence: keyboard_risk={keyboard_risk:.4f} (raw was {keyboard_risk_raw:.4f}), first_window_ts={session.keyboard_first_window_ts}, window_count={session.keyboard_window_count}")
         
         # ===== Trust inactivity decay (uses last_verified_ts) =====
         self._apply_trust_inactivity_decay(session, now)
         
         # ===== Trusted session status =====
         is_trusted = session.trust_score >= TRUSTED_THRESHOLD
+        logger.info(f"[EVAL DEBUG] Trust: score={session.trust_score:.4f}, is_trusted={is_trusted}, threshold={TRUSTED_THRESHOLD}")
         
         # ===== Identity risk =====
         identity_risk, identity_confidence, cold_start_identity, stored_model = \
             self._compute_identity_risk(payload, keyboard_state, session)
+        logger.info(f"[EVAL DEBUG] Identity: risk={identity_risk:.4f}, confidence={identity_confidence:.4f}, cold_start={cold_start_identity}, model={'EXISTS' if stored_model else 'NONE'}")
         
         # Force BLOCK if strikes >= 3
         if session.strikes >= 3:
@@ -494,12 +502,15 @@ class SentinelOrchestrator:
         weights["identity"] *= math.sqrt(identity_confidence)
         
         # ===== Weighted MAX fusion =====
-        final_risk = max(
-            keyboard_risk * weights["keyboard"],
-            mouse_risk * weights["mouse"],
-            navigator_risk * weights["navigator"],
-            effective_identity_risk * weights["identity"]
-        )
+        kb_weighted = keyboard_risk * weights["keyboard"]
+        ms_weighted = mouse_risk * weights["mouse"]
+        nv_weighted = navigator_risk * weights["navigator"]
+        id_weighted = effective_identity_risk * weights["identity"]
+        
+        logger.info(f"[EVAL DEBUG] Weighted risks: kb={kb_weighted:.4f}, mouse={ms_weighted:.4f}, nav={nv_weighted:.4f}, identity={id_weighted:.4f}")
+        logger.info(f"[EVAL DEBUG] Weights: {weights} | Thresholds: {thresholds} | Mode: {session.mode}")
+        
+        final_risk = max(kb_weighted, ms_weighted, nv_weighted, id_weighted)
         final_risk = max(0.0, min(1.0, final_risk))
         
         # ===== Decision =====
@@ -509,6 +520,8 @@ class SentinelOrchestrator:
             decision = SentinelDecision.CHALLENGE
         else:
             decision = SentinelDecision.BLOCK
+        
+        logger.info(f"[EVAL DEBUG] ★ FINAL: risk={final_risk:.4f}, decision={decision}, allow_threshold={thresholds['allow']}, challenge_threshold={thresholds['challenge']}")
         
         return self._finalize_evaluate(
             payload, session, decision, final_risk,
@@ -855,6 +868,23 @@ class SentinelOrchestrator:
         
         if payload.eval_id:
             self.repo.mark_eval_processed(payload.eval_id)
+        
+        # ===== Provisional Ban (First Responder) =====
+        # On BLOCK, set a 5-minute provisional ban in Redis.
+        # Stops spam while the Sentinel Auditor reviews the audit log.
+        # NX = won't overwrite a longer auditor-confirmed ban.
+        if decision == SentinelDecision.BLOCK:
+            ban_key = f"blacklist:{user_id}"
+            try:
+                was_set = self.repo.client.set(
+                    ban_key, "provisional_sentinel_block", ex=300, nx=True
+                )
+                if was_set:
+                    logger.info(f"Provisional ban set for {user_id} (300s)")
+                else:
+                    logger.info(f"Ban already exists for {user_id}, skipping provisional")
+            except Exception as e:
+                logger.error(f"Failed to set provisional ban for {user_id}: {e}")
         
         return EvaluateResponse(
             decision=decision,

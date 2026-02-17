@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 import logging
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -26,8 +26,9 @@ from core.schemas.inputs import (
     MouseStreamPayload,
     EvaluatePayload,
 )
-from core.schemas.outputs import EvaluateResponse
+from core.schemas.outputs import EvaluateResponse, SentinelDecision
 from persistence.session_repository import SessionRepository
+from persistence.audit_logger import AuditLogger
 
 
 # Configure logging
@@ -46,6 +47,7 @@ class AppState:
     """Application state container."""
     orchestrator: Optional[SentinelOrchestrator] = None
     repo: Optional[SessionRepository] = None
+    audit_logger: Optional[AuditLogger] = None
 
 
 state = AppState()
@@ -58,6 +60,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Sentinel Orchestrator API...")
     state.repo = SessionRepository()
     state.orchestrator = SentinelOrchestrator(repo=state.repo)
+    state.audit_logger = AuditLogger()
     logger.info("Sentinel Orchestrator ready")
     
     yield
@@ -179,14 +182,35 @@ async def stream_mouse(payload: MouseStreamPayload):
 # =============================================================================
 
 @app.post("/evaluate", response_model=EvaluateResponse)
-async def evaluate(payload: EvaluatePayload):
+async def evaluate(payload: EvaluatePayload, background_tasks: BackgroundTasks):
     """
     Evaluate session risk and produce security decision.
     
+    - Short-circuits on blacklisted users (returns BLOCK + TTL)
     - Supports idempotency via eval_id
     - Returns ALLOW, CHALLENGE, or BLOCK
     - Implements weighted MAX fusion
+    - Fires audit log to Supabase after every call
     """
+    # ===== Blacklist Short-Circuit =====
+    user_id = payload.request_context.user_id
+    try:
+        ban_reason = state.repo.client.get(f"blacklist:{user_id}")
+        if ban_reason:
+            ttl = state.repo.client.ttl(f"blacklist:{user_id}")
+            logger.info(f"Blacklisted user {user_id} short-circuited (TTL={ttl}s)")
+            result = EvaluateResponse(
+                decision=SentinelDecision.BLOCK,
+                risk=1.0,
+                mode="BANNED",
+                ban_expires_in_seconds=max(ttl, 0)
+            )
+            # Still log the blocked attempt
+            background_tasks.add_task(state.audit_logger.log, payload, result)
+            return result
+    except Exception as e:
+        logger.warning(f"Blacklist check failed: {e}")
+    
     # Rate limiting (10/sec for evaluate)
     if not state.repo.check_eval_rate_limit(payload.session_id):
         raise HTTPException(
@@ -196,6 +220,8 @@ async def evaluate(payload: EvaluatePayload):
     
     try:
         result = state.orchestrator.evaluate(payload)
+        # Fire-and-forget audit log insertion
+        background_tasks.add_task(state.audit_logger.log, payload, result)
         return result
     except Exception as e:
         logger.error(f"Evaluate error: {e}")
