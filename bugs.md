@@ -2,7 +2,20 @@
 
 ## BUG-001: HST Model Blob Corruption (Race Condition)
 
-**Status:** Open
+**Status:** ✅ Fixed
+**Severity:** High — causes permanent CHALLENGE fallback for affected users
+**Discovered:** 2026-02-17
+**Fixed:** 2026-02-17
+
+### Fix Applied
+
+Three-part fix in `persistence/model_store.py`:
+
+1. **Per-user threading lock** (`_get_learn_lock`) — `learn_with_retry` uses a non-blocking `threading.Lock` per `(user_id, model_type)` pair. If another thread is already learning for that user, the call is skipped (next stream batch will pick it up). This prevents concurrent load-train-save cycles from racing.
+
+2. **Base64 validation on save** — After encoding, verifies `len(encoded_blob) % 4 == 0` before writing. Aborts save if invalid (safety net).
+
+3. **Base64 integrity check on load** — Before `base64.b64decode`, validates string length divisibility by 4. If corrupted, returns `None` with a clear error log instead of crashing.
 **Severity:** High — causes permanent CHALLENGE fallback for affected users
 **Discovered:** 2026-02-17
 

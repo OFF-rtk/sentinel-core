@@ -16,6 +16,8 @@ import hashlib
 import logging
 import os
 import pickle
+import threading
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -56,6 +58,10 @@ class ModelStore:
     TABLE_NAME = "user_behavior_models"
     MAX_RETRIES = 3
     
+    # Per-user locks to serialize learn_with_retry calls
+    _learn_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+    _lock_guard = threading.Lock()  # Protects _learn_locks dict itself
+    
     def __init__(self) -> None:
         """Initialize Supabase client from environment."""
         url = os.environ.get("SUPABASE_URL")
@@ -91,6 +97,14 @@ class ModelStore:
             stored_checksum = row.get("checksum")
             
             if isinstance(blob, str):
+                # Validate base64 integrity before decoding
+                if len(blob) % 4 != 0:
+                    logger.error(
+                        f"Corrupted blob for {user_id}/{model_type.value}: "
+                        f"base64 length {len(blob)} not divisible by 4. "
+                        f"Model will be rebuilt from scratch on next ALLOW."
+                    )
+                    return None
                 blob = base64.b64decode(blob)
             
             if stored_checksum:
@@ -128,11 +142,20 @@ class ModelStore:
         try:
             blob = pickle.dumps(model)
             checksum = hashlib.sha256(blob).hexdigest()
+            encoded_blob = base64.b64encode(blob).decode("utf-8")
+            
+            # Sanity check: base64 must always be divisible by 4
+            if len(encoded_blob) % 4 != 0:
+                logger.error(
+                    f"Base64 encoding produced invalid length {len(encoded_blob)} "
+                    f"for {user_id}/{model_type.value}. Aborting save."
+                )
+                return False
             
             record = {
                 "user_id": user_id,
                 "model_type": model_type.value,
-                "model_blob": base64.b64encode(blob).decode("utf-8"),
+                "model_blob": encoded_blob,
                 "feature_window_count": feature_window_count,
                 "checksum": checksum,
                 "last_trained_at": "now()",
@@ -165,6 +188,12 @@ class ModelStore:
             logger.error(f"Failed to save {model_type.value} for {user_id}: {e}")
             return False
     
+    def _get_learn_lock(self, user_id: str, model_type: ModelType) -> threading.Lock:
+        """Get or create a per-user per-model lock."""
+        lock_key = f"{user_id}:{model_type.value}"
+        with self._lock_guard:
+            return self._learn_locks[lock_key]
+    
     def learn_with_retry(
         self,
         user_id: str,
@@ -176,6 +205,10 @@ class ModelStore:
         """
         Load-train-save with retry loop for concurrent safety.
         
+        Uses a per-user per-model threading lock to serialize access.
+        This prevents concurrent load-train-save cycles from producing
+        corrupted blobs due to partial reads during writes.
+        
         Args:
             user_id: User identifier
             model_type: HST or IDENTITY
@@ -186,32 +219,48 @@ class ModelStore:
         Returns:
             True if learning succeeded
         """
-        for attempt in range(self.MAX_RETRIES):
-            stored = self.load_model(user_id, model_type)
-            
-            if stored is None:
-                # Create new model
-                model = create_model_fn()
-                learn_fn(model)
-                if self.save_model(user_id, model, window_increment, model_type, None):
-                    return True
-            else:
-                # Update existing
-                learn_fn(stored.model)
-                new_count = stored.feature_window_count + window_increment
-                if self.save_model(
-                    user_id,
-                    stored.model,
-                    new_count,
-                    model_type,
-                    stored.model_version
-                ):
-                    return True
-            
-            logger.debug(f"Retry {attempt + 1} for {model_type.value}/{user_id}")
+        lock = self._get_learn_lock(user_id, model_type)
         
-        logger.warning(f"Failed to learn after {self.MAX_RETRIES} retries")
-        return False
+        # Non-blocking acquire: if another thread is already learning
+        # for this user+model, skip this cycle entirely instead of
+        # queueing up (the next stream batch will pick it up).
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            logger.debug(
+                f"Skipping {model_type.value} learning for {user_id}: "
+                f"another thread is already learning"
+            )
+            return False
+        
+        try:
+            for attempt in range(self.MAX_RETRIES):
+                stored = self.load_model(user_id, model_type)
+                
+                if stored is None:
+                    # Create new model
+                    model = create_model_fn()
+                    learn_fn(model)
+                    if self.save_model(user_id, model, window_increment, model_type, None):
+                        return True
+                else:
+                    # Update existing
+                    learn_fn(stored.model)
+                    new_count = stored.feature_window_count + window_increment
+                    if self.save_model(
+                        user_id,
+                        stored.model,
+                        new_count,
+                        model_type,
+                        stored.model_version
+                    ):
+                        return True
+                
+                logger.debug(f"Retry {attempt + 1} for {model_type.value}/{user_id}")
+            
+            logger.warning(f"Failed to learn after {self.MAX_RETRIES} retries")
+            return False
+        finally:
+            lock.release()
     
     def get_sample_count(
         self,
