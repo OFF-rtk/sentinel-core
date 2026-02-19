@@ -523,6 +523,22 @@ class SentinelOrchestrator:
         
         logger.info(f"[EVAL DEBUG] ★ FINAL: risk={final_risk:.4f}, decision={decision}, allow_threshold={thresholds['allow']}, challenge_threshold={thresholds['challenge']}")
         
+        # ===== Cold Start Override =====
+        # If HST model is immature (< 50 windows learned), force one CHALLENGE
+        # per action to generate training data. On the retry (after user types
+        # challenge text), allow the action so HST can learn from the windows.
+        stored_hst = self.model_store.load_model(user_id, ModelType.HST)
+        hst_cold_start = (stored_hst is None or stored_hst.feature_window_count < 50)
+        
+        if hst_cold_start and decision == SentinelDecision.ALLOW:
+            if not keyboard_state.completed_windows and session.mode != "CHALLENGE":
+                # No typing data AND not already challenged → force CHALLENGE to collect keystrokes
+                decision = SentinelDecision.CHALLENGE
+                logger.info(f"[COLD START] HST immature (windows={stored_hst.feature_window_count if stored_hst else 0}), forcing CHALLENGE")
+            else:
+                # Has windows OR already in challenge mode → ALLOW so HST can learn
+                logger.info(f"[COLD START] Allowing: windows={len(keyboard_state.completed_windows)}, mode={session.mode}")
+        
         return self._finalize_evaluate(
             payload, session, decision, final_risk,
             keyboard_state, navigator_risk, identity_risk,
@@ -760,8 +776,9 @@ class SentinelOrchestrator:
             return False
         if session.consecutive_allows < 5:
             return False
-        if cold_start_identity:
-            return False
+        # cold_start_identity guard removed — BUG-002 fix
+        # The identity model can never be created if we block learning
+        # when no model exists. Other guards are sufficient.
         
         # CONTEXT_STABILITY_DELAY is seconds (30.0) -> ms
         if now - session.last_context_change_ts < (CONTEXT_STABILITY_DELAY * 1000.0):
@@ -801,11 +818,17 @@ class SentinelOrchestrator:
         self._update_trust(session, risk, identity_risk)
         
         # ===== HST Learning (persistent, per-user) =====
+        # Cold start: learn in any mode to bootstrap quickly
+        # Post cold start: only learn in NORMAL mode (anti-poisoning)
+        hst_for_learning = self.model_store.load_model(user_id, ModelType.HST)
+        hst_is_cold = (hst_for_learning is None or hst_for_learning.feature_window_count < 50)
+        hst_mode_ok = (session.mode == "NORMAL" or hst_is_cold)
+        
         if (decision == SentinelDecision.ALLOW and
-                session.mode == "NORMAL" and
+                hst_mode_ok and
                 now >= session.learning_suspended_until):
             if keyboard_state.completed_windows:
-                windows_to_learn = keyboard_state.completed_windows[-IDENTITY_MAX_WINDOWS:]
+                windows_to_learn = keyboard_state.completed_windows  # Learn ALL windows (BUG-003 fix)
                 
                 def learn_hst(model: Any) -> None:
                     for window in windows_to_learn:
@@ -818,6 +841,32 @@ class SentinelOrchestrator:
                     lambda: KeyboardAnomalyModel(),
                     len(windows_to_learn)
                 )
+                logger.info(f"[HST] Learned {len(windows_to_learn)} windows (cold_start={hst_is_cold}, mode={session.mode})")
+                
+                # Clear consumed windows so cold start forces fresh CHALLENGE next time
+                keyboard_state.completed_windows = []
+                keyboard_state.last_score = 0.0
+                self.repo._save_keyboard_state(payload.session_id, keyboard_state)
+        
+        # ===== HST Cold Start Bootstrap (learn on CHALLENGE too) =====
+        elif (decision == SentinelDecision.CHALLENGE and
+                keyboard_state.completed_windows):
+            stored_hst_check = self.model_store.load_model(user_id, ModelType.HST)
+            if stored_hst_check is None or stored_hst_check.feature_window_count < 50:
+                windows_to_learn = keyboard_state.completed_windows
+                
+                def learn_hst_bootstrap(model: Any) -> None:
+                    for window in windows_to_learn:
+                        model.learn_one(window["features"])
+                
+                self.model_store.learn_with_retry(
+                    user_id,
+                    ModelType.HST,
+                    learn_hst_bootstrap,
+                    lambda: KeyboardAnomalyModel(),
+                    len(windows_to_learn)
+                )
+                logger.info(f"[COLD START] Bootstrap learning: {len(windows_to_learn)} windows on CHALLENGE")
         
         # ===== Identity Learning (with retry) =====
         if (decision == SentinelDecision.ALLOW and

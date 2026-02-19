@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import pickle
+import zlib
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
@@ -102,10 +103,24 @@ class ModelStore:
                     logger.error(
                         f"Corrupted blob for {user_id}/{model_type.value}: "
                         f"base64 length {len(blob)} not divisible by 4. "
-                        f"Model will be rebuilt from scratch on next ALLOW."
+                        f"Deleting corrupted row and rebuilding."
                     )
+                    # Delete the corrupted row so next save creates a clean one
+                    try:
+                        self.client.table(self.TABLE_NAME).delete().eq(
+                            "user_id", user_id
+                        ).eq("model_type", model_type.value).execute()
+                        logger.info(f"Deleted corrupted {model_type.value} row for {user_id}")
+                    except Exception as del_err:
+                        logger.error(f"Failed to delete corrupted row: {del_err}")
                     return None
                 blob = base64.b64decode(blob)
+            
+            # Decompress if zlib-compressed (backward compat: try/except)
+            try:
+                blob = zlib.decompress(blob)
+            except zlib.error:
+                pass  # Old uncompressed blob, use as-is
             
             if stored_checksum:
                 computed = hashlib.sha256(blob).hexdigest()
@@ -142,7 +157,14 @@ class ModelStore:
         try:
             blob = pickle.dumps(model)
             checksum = hashlib.sha256(blob).hexdigest()
-            encoded_blob = base64.b64encode(blob).decode("utf-8")
+            compressed = zlib.compress(blob, level=6)
+            encoded_blob = base64.b64encode(compressed).decode("utf-8")
+            
+            logger.info(
+                f"Saving {model_type.value} for {user_id}: "
+                f"pickle={len(blob)} bytes, compressed={len(compressed)} bytes, "
+                f"base64={len(encoded_blob)} chars"
+            )
             
             # Sanity check: base64 must always be divisible by 4
             if len(encoded_blob) % 4 != 0:

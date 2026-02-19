@@ -121,7 +121,7 @@ class SessionRepository:
     BATCH_TOLERANCE: int = 3
     STREAM_RATE_LIMIT: int = 20  # per second
     EVAL_RATE_LIMIT: int = 10   # per second
-    MAX_PENDING_EVENTS: int = 50
+    MAX_PENDING_EVENTS: int = 300  # Must hold 120-char challenge text (240 raw events)
     MAX_COMPLETED_ITEMS: int = 20
     
     def __init__(self) -> None:
@@ -211,6 +211,17 @@ class SessionRepository:
             self.client.delete(self._keyboard_key(session_id))
         except RedisError as e:
             logger.warning(f"Failed to reset keyboard state {session_id}: {e}")
+    
+    def _save_keyboard_state(self, session_id: str, keyboard_state: KeyboardState) -> None:
+        """Save keyboard state with TTL."""
+        try:
+            self.client.setex(
+                self._keyboard_key(session_id),
+                self.SESSION_TTL,
+                json.dumps(keyboard_state.to_dict())
+            )
+        except RedisError as e:
+            logger.error(f"Failed to save keyboard state {session_id}: {e}")
     
     # -------------------------------------------------------------------------
     # Mouse State Operations

@@ -12,21 +12,30 @@ In a naive online system, every new data point updates the model.
 Sentinel enforces a strict rule: **"Only learn from the best."**
 *Disclaimer: Selective Learning prioritizes security over recall and may slow personalization for edge users.*
 
-### 1. The Gating Logic
-We only trigger a model update (`model.learn_one()`) if the session meets strict criteria:
+### 1. HST Learning (Anomaly Baseline)
+The HST (Half-Space Trees) model learns what "normal" typing looks like. It has a **cold-start-aware mode gate**:
+
+```
+Cold start (HST < 50 windows): learn in ANY mode → fast bootstrap
+Post cold start:               learn only in NORMAL mode → anti-poisoning
+```
+
+During cold start, the system forces a CHALLENGE on each action to collect typing data, learns from the completed windows, then clears them to force the next CHALLENGE. This continues until the model reaches 50 feature windows.
+
+### 2. Identity Learning (Per-User Profile)
+We only trigger an identity model update (`model.learn_one()`) if the session meets strict criteria:
 
 ```
 ShouldLearn = (Mode == "NORMAL") ∧
               (TrustScore ≥ 0.65) ∧
               (NavigatorRisk < 0.5) ∧
               (ConsecutiveAllows ≥ 5) ∧
-              (NotInColdStart) ∧
               (ContextStable for 30s)
 ```
 
 If the Trust Score drops below 0.65, learning is immediately disabled for that user. This creates a "ratchet" effect: you can lose trust easily, but you can only define "normal" when you are beyond suspicion.
 
-### 2. Time-Delayed Commitment
+### 3. Time-Delayed Commitment
 We do not persist model updates to the database immediately. Updates are kept in memory (Redis) during the session.
 *   **Commit**: Only when the session ends gracefully with a High Trust score.
 *   **Discard**: If the session ends in a BLOCK or CHALLENGE, the in-memory updates are discarded. The model reverts to its state before the attack began.

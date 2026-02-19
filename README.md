@@ -78,9 +78,9 @@ Users are evaluated differently at second 1 vs minute 10.
 > Full lifecycle & flowcharts: [docs/decision-engine.md](docs/decision-engine.md)
 
 ## Tech Stack
-- **Language**: Python 3.11
+- **Language**: Python 3.13
 - **Web**: FastAPI (async)
-- **ML**: River (online learning), NumPy (physics)
+- **ML**: River 0.23 (online learning), NumPy (physics)
 - **Storage**: Redis (hot state via Upstash), Supabase (long-term)
 - **DevOps**: Docker, GitHub Actions
 
@@ -89,7 +89,7 @@ Users are evaluated differently at second 1 vs minute 10.
 
 ### Prerequisites
 - Docker & Docker Compose
-- Python 3.11+
+- Python 3.13+
 
 ### Environment
 Create a `.env` file in the project root:

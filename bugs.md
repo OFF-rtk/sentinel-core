@@ -114,3 +114,82 @@ In the orchestrator or stream handler, ensure only one `learn_with_retry` for `k
 
 - `persistence/model_store.py` — save/load validation + auto-heal
 - `core/orchestrator.py` — debounce HST persistence
+
+---
+
+## BUG-002: Identity Learning Catch-22 (Cold Start Deadlock)
+
+**Status:** 🔴 Open
+**Severity:** Critical — identity model is never created for any user
+**Discovered:** 2026-02-18
+
+### Symptoms
+
+- No `keyboard_identity` rows ever appear in the `user_behavior_models` Supabase table
+- Identity risk and identity confidence are always 0.0
+- `_compute_identity_risk` always returns `cold_start_identity=True`
+
+### Root Cause
+
+**Chicken-and-egg in `_should_learn_identity` (orchestrator.py, line ~760).**
+
+```python
+def _should_learn_identity(self, session, navigator_risk, cold_start_identity, now):
+    ...
+    if cold_start_identity:   # ← THIS IS THE BUG
+        return False
+    ...
+```
+
+`cold_start_identity` is set to `True` by `_compute_identity_risk` when no stored identity model exists. Since identity learning is the only way to CREATE the model, and it's gated behind the model already existing, the model can never be created.
+
+### Fix
+
+Remove the `cold_start_identity` guard from `_should_learn_identity`. The other guards (trust ≥ 0.65, consecutive_allows ≥ 5, NORMAL mode, navigator_risk < 0.5, context stability) already provide sufficient safety gating.
+
+### Files Affected
+
+- `core/orchestrator.py` — `_should_learn_identity` method
+
+---
+
+## BUG-003: Keyboard HST Score Always 0.0
+
+**Status:** 🔴 Open
+**Severity:** High — keyboard biometrics provide zero risk signal
+**Discovered:** 2026-02-18
+
+### Symptoms
+
+- Keyboard risk score is always 0.0 in evaluate responses
+- HST model rows may exist in Supabase but have very low `feature_window_count`
+- Risk fusion relies entirely on mouse (physics) and navigator (rules)
+
+### Root Cause (Three Compounding Factors)
+
+**Factor 1: HST cold start period requires 50 `learn_one()` calls.**
+
+The `HalfSpaceTrees` detector has `window_size=50`, meaning it returns 0.0 for the first 50 training samples. Learning only happens in `_finalize_evaluate` on ALLOW decisions.
+
+**Factor 2: Learning cap discards most training data.**
+
+`IDENTITY_MAX_WINDOWS = 5` limits learning to the last 5 completed windows per evaluate call:
+```python
+windows_to_learn = keyboard_state.completed_windows[-IDENTITY_MAX_WINDOWS:]
+```
+If a session has 20 completed windows, 15 are discarded. This means 10+ ALLOWs are needed to exit cold start.
+
+**Factor 3: Keyboard confidence multiplier suppresses early scores.**
+
+Even if HST produced a small non-zero score, `_apply_keyboard_confidence` multiplies it by `√(conf_time × conf_count)` which is 0.0 early in a session, crushing any score to zero.
+
+### Fix
+
+1. Remove or increase `IDENTITY_MAX_WINDOWS` cap for HST learning — learn all available windows
+2. Force one CHALLENGE per action during HST cold start — generates training data from typed challenge text
+3. After the forced CHALLENGE, ALLOW the action — HST learns from completed windows
+4. Filter out high-anomaly windows (score > 95th percentile) during learning to prevent training on suspicious data
+
+### Files Affected
+
+- `core/orchestrator.py` — learning logic, cold start CHALLENGE, window filtering
