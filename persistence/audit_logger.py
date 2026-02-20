@@ -19,8 +19,9 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
+import geoip2.database
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,13 @@ class AuditLogger:
             return
         self._client = create_client(url, key)
 
+        # GeoIP reader — same database used by the context processor
+        try:
+            self.geoip = geoip2.database.Reader("assets/GeoLite2-City.mmdb")
+        except Exception as e:
+            logger.warning(f"GeoIP database unavailable for audit logger: {e}")
+            self.geoip = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -53,7 +61,6 @@ class AuditLogger:
         self,
         payload: Any,
         result: Any,
-        nav_metrics: Optional[Dict] = None,
     ) -> None:
         """
         Build and insert an audit log entry.
@@ -61,13 +68,12 @@ class AuditLogger:
         Args:
             payload:  The EvaluatePayload from the request.
             result:   The EvaluateResponse returned to the caller.
-            nav_metrics: Optional navigator metrics dict from orchestrator.
         """
         if self._client is None:
             return
 
         try:
-            entry = self._build_entry(payload, result, nav_metrics)
+            entry = self._build_entry(payload, result)
             self._client.table("audit_logs").insert({
                 "event_id": entry["event_id"],
                 "payload": entry,
@@ -77,6 +83,43 @@ class AuditLogger:
             logger.error(f"Audit log insertion failed: {e}")
 
     # ------------------------------------------------------------------
+    # GeoIP Lookup
+    # ------------------------------------------------------------------
+
+    def _resolve_ip(self, ip_address: str) -> Dict[str, Any]:
+        """
+        Resolve IP address to geo data using GeoLite2.
+        Returns { country, city, asn, lat, lng } — all best-effort.
+        """
+        if self.geoip is None:
+            return {"country": "unknown", "city": "unknown", "asn": "unknown", "lat": None, "lng": None}
+
+        # Private/reserved IPs can't be resolved
+        if ip_address.startswith((
+            "10.", "172.16.", "172.17.", "172.18.", "172.19.",
+            "172.20.", "172.21.", "172.22.", "172.23.",
+            "172.24.", "172.25.", "172.26.", "172.27.",
+            "172.28.", "172.29.", "172.30.", "172.31.",
+            "192.168.", "127.", "0.", "::1", "fe80:",
+        )):
+            return {"country": "private", "city": "private", "asn": "private", "lat": None, "lng": None}
+
+        try:
+            response = self.geoip.city(ip_address)
+            lat = response.location.latitude if response.location.latitude else None
+            lng = response.location.longitude if response.location.longitude else None
+            return {
+                "country": response.country.iso_code or "unknown",
+                "city": response.city.name or "unknown",
+                "asn": f"AS{response.traits.autonomous_system_number}" if hasattr(response.traits, 'autonomous_system_number') and response.traits.autonomous_system_number else "unknown",
+                "lat": lat,
+                "lng": lng,
+            }
+        except Exception as e:
+            logger.debug(f"GeoIP lookup failed for {ip_address}: {e}")
+            return {"country": "unknown", "city": "unknown", "asn": "unknown", "lat": None, "lng": None}
+
+    # ------------------------------------------------------------------
     # Payload Builder
     # ------------------------------------------------------------------
 
@@ -84,7 +127,6 @@ class AuditLogger:
         self,
         payload: Any,
         result: Any,
-        nav_metrics: Optional[Dict],
     ) -> Dict[str, Any]:
         """Assemble the full audit log payload."""
 
@@ -103,27 +145,16 @@ class AuditLogger:
             )
             session_age = max(session_age, 0)
 
-        # Geo / IP reputation from navigator metrics
-        geo_data = {}
-        ip_reputation = "unknown"
-        if nav_metrics:
-            geo_data = nav_metrics.get("current_geo_data", {}) or {}
-            ip_reputation = nav_metrics.get("ip_reputation", "unknown") or "unknown"
+        # Geo lookup directly from IP
+        geo = self._resolve_ip(payload.request_context.ip_address)
 
-        # Client fingerprint
-        fingerprint = {}
+        # Client fingerprint (device_id + user_agent only, no ja3_hash)
+        fingerprint = {
+            "device_id": "unknown",
+            "user_agent": payload.request_context.user_agent,
+        }
         if payload.client_fingerprint:
-            fingerprint = {
-                "device_id": payload.client_fingerprint.device_id,
-                "ja3_hash": payload.client_fingerprint.ja3_hash or "unknown",
-                "user_agent_raw": payload.request_context.user_agent,
-            }
-        else:
-            fingerprint = {
-                "device_id": "unknown",
-                "ja3_hash": "unknown",
-                "user_agent_raw": payload.request_context.user_agent,
-            }
+            fingerprint["device_id"] = payload.client_fingerprint.device_id
 
         # Decision string
         decision_str = (
@@ -131,6 +162,11 @@ class AuditLogger:
             if hasattr(result.decision, "value")
             else str(result.decision)
         )
+
+        # Anomaly vectors — pull from the result if present
+        anomaly_vectors: List[str] = []
+        if hasattr(result, "anomaly_vectors") and result.anomaly_vectors:
+            anomaly_vectors = result.anomaly_vectors
 
         return {
             # Metadata
@@ -150,12 +186,7 @@ class AuditLogger:
             # Network
             "network_context": {
                 "ip_address": payload.request_context.ip_address,
-                "ip_reputation": ip_reputation,
-                "geo_location": {
-                    "country": geo_data.get("country", "unknown"),
-                    "city": geo_data.get("city", "unknown"),
-                    "asn": geo_data.get("asn", "unknown"),
-                },
+                "geo_location": geo,
                 "client_fingerprint": fingerprint,
             },
 
@@ -172,7 +203,7 @@ class AuditLogger:
                 "engine_version": self.ENGINE_VERSION,
                 "risk_score": result.risk,
                 "decision": decision_str,
-                "anomaly_vectors": [],  # populated if tracked by orchestrator
+                "anomaly_vectors": anomaly_vectors,
             },
 
             # Security Enforcement

@@ -392,6 +392,8 @@ class SentinelOrchestrator:
         # 3. Assess Decision
         nav_analysis = self.policy_engine.evaluate(nav_metrics)
         navigator_risk = nav_analysis.risk_score
+        # Thread anomaly vectors into nav_metrics for audit logging
+        nav_metrics["anomaly_vectors"] = nav_analysis.anomaly_vectors
         logger.info(f"[EVAL DEBUG] Navigator: risk={navigator_risk:.4f}, decision={nav_analysis.decision}")
         
         # ===== TOFU: Trust On First Use =====
@@ -936,8 +938,14 @@ class SentinelOrchestrator:
             except Exception as e:
                 logger.error(f"Failed to set provisional ban for {user_id}: {e}")
         
+        # Collect anomaly vectors from nav_metrics for audit logging
+        anomaly_vectors = []
+        if nav_metrics:
+            anomaly_vectors = nav_metrics.get("anomaly_vectors", [])
+        
         return EvaluateResponse(
             decision=decision,
             risk=risk,
-            mode=session.mode
+            mode=session.mode,
+            anomaly_vectors=anomaly_vectors
         )

@@ -130,11 +130,17 @@ class EvaluateResponse(BaseModel):
     - risk: Final fused risk score (0.0 to 1.0)
     - mode: Current session mode (NORMAL or CHALLENGE)
     - ban_expires_in_seconds: Remaining ban TTL (only present when blacklisted)
+    - anomaly_vectors: Detected anomaly types (for audit logging)
     """
     decision: SentinelDecision = Field(..., description="Security decision")
     risk: float = Field(..., ge=0.0, le=1.0, description="Final risk score")
     mode: str = Field(..., description="Session mode (NORMAL or CHALLENGE)")
     ban_expires_in_seconds: Optional[int] = Field(
         None, description="Remaining ban time in seconds (present only on BLOCK from blacklist)"
+    )
+    anomaly_vectors: List[str] = Field(
+        default_factory=list,
+        description="Detected anomaly types",
+        exclude=True,  # Not included in API JSON response
     )
 
