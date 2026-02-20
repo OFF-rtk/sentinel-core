@@ -524,20 +524,21 @@ class SentinelOrchestrator:
         logger.info(f"[EVAL DEBUG] ★ FINAL: risk={final_risk:.4f}, decision={decision}, allow_threshold={thresholds['allow']}, challenge_threshold={thresholds['challenge']}")
         
         # ===== Cold Start Override =====
-        # If HST model is immature (< 50 windows learned), force one CHALLENGE
-        # per action to generate training data. On the retry (after user types
-        # challenge text), allow the action so HST can learn from the windows.
+        # If HST model is immature (< 50 windows learned), force CHALLENGE
+        # on every action that has no fresh typing data. After the user types
+        # the challenge text, completed_windows will be non-empty on retry,
+        # letting that specific action through as ALLOW.
         stored_hst = self.model_store.load_model(user_id, ModelType.HST)
         hst_cold_start = (stored_hst is None or stored_hst.feature_window_count < 50)
         
         if hst_cold_start and decision == SentinelDecision.ALLOW:
-            if not keyboard_state.completed_windows and session.mode != "CHALLENGE":
-                # No typing data AND not already challenged → force CHALLENGE to collect keystrokes
+            if not keyboard_state.completed_windows:
+                # No fresh typing data for this action → force CHALLENGE
                 decision = SentinelDecision.CHALLENGE
-                logger.info(f"[COLD START] HST immature (windows={stored_hst.feature_window_count if stored_hst else 0}), forcing CHALLENGE")
+                logger.info(f"[COLD START] HST immature (windows={stored_hst.feature_window_count if stored_hst else 0}), forcing CHALLENGE — no fresh windows")
             else:
-                # Has windows OR already in challenge mode → ALLOW so HST can learn
-                logger.info(f"[COLD START] Allowing: windows={len(keyboard_state.completed_windows)}, mode={session.mode}")
+                # Has windows from challenge typing → ALLOW so HST can learn
+                logger.info(f"[COLD START] Allowing: {len(keyboard_state.completed_windows)} fresh windows available, mode={session.mode}")
         
         return self._finalize_evaluate(
             payload, session, decision, final_risk,
