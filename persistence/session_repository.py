@@ -93,6 +93,11 @@ class MouseState:
     last_score: float = 0.0
     last_event_ts: float = 0.0
     
+    # Teleportation detection: clicks with < 3 preceding MOVE events
+    # A real human hand always produces micro-movements before clicking.
+    total_clicks: int = 0
+    teleportation_clicks: int = 0
+    
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
     

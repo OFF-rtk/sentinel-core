@@ -201,7 +201,7 @@ class AuditLogger:
             # Sentinel Analysis
             "sentinel_analysis": {
                 "engine_version": self.ENGINE_VERSION,
-                "risk_score": result.risk,
+                "risk_score": round(result.risk, 4),
                 "decision": decision_str,
                 "anomaly_vectors": anomaly_vectors,
             },

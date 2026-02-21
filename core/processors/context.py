@@ -124,6 +124,9 @@ class NavigatorContextProcessor:
                 current_geo.get("asn_type", "unknown"),
                 0.3
             ),
+            "is_unknown_user_agent": self._calc_is_unknown_user_agent(
+                request.network_context.user_agent
+            ),
             # Raw geo data for persistence (used by orchestrator/TOFU)
             "current_geo_data": {
                 "city": current_geo.get("city", "Unknown"),
@@ -388,6 +391,26 @@ class NavigatorContextProcessor:
         
         # Analyst cannot access secrets
         if role_lower == "analyst" and "secret" in resource_lower:
+            return 1.0
+        
+        return 0.0
+
+    def _calc_is_unknown_user_agent(self, user_agent: str) -> float:
+        """
+        Detect non-browser user agents (bots, scripts, automation tools).
+        
+        Returns 1.0 if the UA doesn't parse to a known browser family.
+        Bot UAs like 'BotAttackDemo/1.0' or 'python-requests' return
+        browser.family='Other' from the ua parser.
+        """
+        ua = parse_user_agent(user_agent)
+        
+        # ua-parser marks bots and unknown UAs
+        if ua.is_bot:
+            return 1.0
+        
+        # 'Other' family means the parser couldn't identify a real browser
+        if ua.browser.family == "Other":
             return 1.0
         
         return 0.0

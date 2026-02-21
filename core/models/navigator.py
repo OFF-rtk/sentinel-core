@@ -83,6 +83,11 @@ class NavigatorPolicyEngine:
         if policy_violation == 1.0:
             anomaly_vectors.append("policy_violation")
         
+        # Unknown user-agent detection (bot/script/automation)
+        is_unknown_ua = float(metrics.get("is_unknown_user_agent", 0.0))
+        if is_unknown_ua == 1.0:
+            anomaly_vectors.append("unknown_user_agent")
+        
         # =================================================================
         # Calculate Risk Score
         # =================================================================
@@ -98,6 +103,9 @@ class NavigatorPolicyEngine:
         
         # Device risk: direct value
         device_risk = is_new_device * 0.5  # New device is 50% risk factor
+        
+        # Note: unknown_user_agent only emits an anomaly vector for audit context.
+        # It does NOT inflate the risk score — could just be a niche browser.
         
         # Final risk score: maximum of all risk components
         risk_score = max(

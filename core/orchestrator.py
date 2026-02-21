@@ -234,6 +234,7 @@ class SentinelOrchestrator:
                 "features": features,
                 "score": score,
                 "event_ts": event_ts,
+                "vectors": vectors,
             })
             new_pending = []
             
@@ -295,11 +296,32 @@ class SentinelOrchestrator:
         
         new_pending = []
         last_event_ts = mouse_state.last_event_ts
+        moves_since_last_click = 0  # Track MOVE events between CLICKs
+        
+        # Count pending MOVEs already in buffer (from previous batches)
+        for evt in mouse_state.pending_events:
+            if evt.get("event_type") == "MOVE":
+                moves_since_last_click += 1
         
         for event in payload.events:
             last_event_ts = max(last_event_ts, event.timestamp)
             features = processor.process_event(event)
             new_pending.append(event.model_dump())
+            
+            # Teleportation detection: count MOVEs between CLICKs
+            if event.event_type == "MOVE":
+                moves_since_last_click += 1
+            elif event.event_type == "CLICK":
+                mouse_state.total_clicks += 1
+                if moves_since_last_click < 3:
+                    # < 3 MOVEs before click = cursor teleported to target
+                    # Human hand micro-tremor ALWAYS produces 3+ move events
+                    mouse_state.teleportation_clicks += 1
+                    logger.info(
+                        f"[MOUSE] Teleportation detected: {moves_since_last_click} moves "
+                        f"before click (total: {mouse_state.teleportation_clicks}/{mouse_state.total_clicks})"
+                    )
+                moves_since_last_click = 0  # Reset counter after each click
             
             if features is not None:
                 score, vectors = self.mouse_model.score_one(features)
@@ -354,8 +376,23 @@ class SentinelOrchestrator:
         mouse_state = self.repo.get_mouse_state(payload.session_id)
         
         keyboard_risk_raw = keyboard_state.last_score
-        mouse_risk = mouse_state.last_score
-        logger.info(f"[EVAL DEBUG] Raw scores: keyboard={keyboard_risk_raw:.4f}, mouse={mouse_risk:.4f}, kb_windows={session.keyboard_window_count}")
+        mouse_risk_physics = mouse_state.last_score
+        
+        # ===== Mouse teleportation risk =====
+        # Clicks with < 3 preceding MOVE events indicate cursor teleportation.
+        # A real human hand always produces micro-tremor movements before clicking.
+        teleportation_risk = 0.0
+        if mouse_state.total_clicks >= 2:  # Need at least 2 clicks to judge
+            teleport_ratio = mouse_state.teleportation_clicks / mouse_state.total_clicks
+            teleportation_risk = teleport_ratio  # 0.0 (all human) to 1.0 (all teleported)
+            logger.info(
+                f"[EVAL DEBUG] Mouse teleportation: {mouse_state.teleportation_clicks}/{mouse_state.total_clicks} "
+                f"clicks teleported, ratio={teleport_ratio:.2f}"
+            )
+        
+        # Combine physics + teleportation (either detector alone can flag)
+        mouse_risk = max(mouse_risk_physics, teleportation_risk)
+        logger.info(f"[EVAL DEBUG] Raw scores: keyboard={keyboard_risk_raw:.4f}, mouse={mouse_risk:.4f} (physics={mouse_risk_physics:.4f}, teleport={teleportation_risk:.4f}), kb_windows={session.keyboard_window_count}")
         
         # ===== Navigator Risk =====
         # 1. Build EvaluationRequest
@@ -503,7 +540,10 @@ class SentinelOrchestrator:
         effective_identity_risk = identity_risk * identity_confidence
         weights["identity"] *= math.sqrt(identity_confidence)
         
-        # ===== Weighted MAX fusion =====
+        # ===== Weighted SUM fusion (cumulative risk) =====
+        # Signals compound: suspicious UA + robotic typing + mouse teleportation
+        # all add up. Much harder for a bot to stay below threshold when
+        # multiple independent detectors each contribute partial risk.
         kb_weighted = keyboard_risk * weights["keyboard"]
         ms_weighted = mouse_risk * weights["mouse"]
         nv_weighted = navigator_risk * weights["navigator"]
@@ -512,7 +552,7 @@ class SentinelOrchestrator:
         logger.info(f"[EVAL DEBUG] Weighted risks: kb={kb_weighted:.4f}, mouse={ms_weighted:.4f}, nav={nv_weighted:.4f}, identity={id_weighted:.4f}")
         logger.info(f"[EVAL DEBUG] Weights: {weights} | Thresholds: {thresholds} | Mode: {session.mode}")
         
-        final_risk = max(kb_weighted, ms_weighted, nv_weighted, id_weighted)
+        final_risk = kb_weighted + ms_weighted + nv_weighted + id_weighted
         final_risk = max(0.0, min(1.0, final_risk))
         
         # ===== Decision =====
@@ -938,10 +978,41 @@ class SentinelOrchestrator:
             except Exception as e:
                 logger.error(f"Failed to set provisional ban for {user_id}: {e}")
         
-        # Collect anomaly vectors from nav_metrics for audit logging
+        # Collect anomaly vectors from ALL detection layers
         anomaly_vectors = []
+        
+        # Navigator vectors (user-agent, geo, etc.)
         if nav_metrics:
-            anomaly_vectors = nav_metrics.get("anomaly_vectors", [])
+            anomaly_vectors.extend(nav_metrics.get("anomaly_vectors", []))
+        
+        # Keyboard vectors (Z-score attribution from HST)
+        keyboard_state_final = self.repo.get_keyboard_state(payload.session_id)
+        for window in keyboard_state_final.completed_windows:
+            for v in window.get("vectors", []):
+                if v not in anomaly_vectors:
+                    anomaly_vectors.append(v)
+        
+        # High-level keyboard anomaly signal (when percentile risk is elevated)
+        kb_risk = keyboard_state.last_score
+        if kb_risk > 0.0:
+            confidence = min(1.0, session.keyboard_window_count / 10.0)
+            if kb_risk >= 0.5:
+                anomaly_vectors.append(
+                    f"keystroke_anomaly_{kb_risk:.2f}_confidence_{confidence:.2f}"
+                )
+            elif kb_risk >= 0.3:
+                anomaly_vectors.append(
+                    f"keystroke_elevated_{kb_risk:.2f}_confidence_{confidence:.2f}"
+                )
+        
+        # Mouse teleportation vector
+        mouse_state_final = self.repo.get_mouse_state(payload.session_id)
+        if (mouse_state_final.total_clicks >= 2 and
+                mouse_state_final.teleportation_clicks > 0):
+            ratio = mouse_state_final.teleportation_clicks / mouse_state_final.total_clicks
+            anomaly_vectors.append(
+                f"mouse_teleportation_{ratio:.2f}"
+            )
         
         return EvaluateResponse(
             decision=decision,

@@ -120,7 +120,7 @@ class KeyboardAnomalyModel:
     
     # Quantile checkpoints for percentile interpolation
     _QUANTILE_CHECKPOINTS: List[float] = [0.5, 0.75, 0.9, 0.95, 0.99]
-    _MIN_SAMPLES_FOR_PERCENTILE: int = 20  # Minimum samples after cold start
+    _MIN_SAMPLES_FOR_PERCENTILE: int = 0  # Activate immediately after HST cold start
     
     def __init__(self) -> None:
         """Initialize the keyboard anomaly detection pipeline."""
