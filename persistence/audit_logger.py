@@ -89,10 +89,10 @@ class AuditLogger:
     def _resolve_ip(self, ip_address: str) -> Dict[str, Any]:
         """
         Resolve IP address to geo data using GeoLite2.
-        Returns { country, city, asn, lat, lng } — all best-effort.
+        Returns { country, city, lat, lng } — all best-effort.
         """
         if self.geoip is None:
-            return {"country": "unknown", "city": "unknown", "asn": "unknown", "lat": None, "lng": None}
+            return {"country": "unknown", "city": "unknown", "lat": None, "lng": None}
 
         # Private/reserved IPs can't be resolved
         if ip_address.startswith((
@@ -102,7 +102,7 @@ class AuditLogger:
             "172.28.", "172.29.", "172.30.", "172.31.",
             "192.168.", "127.", "0.", "::1", "fe80:",
         )):
-            return {"country": "private", "city": "private", "asn": "private", "lat": None, "lng": None}
+            return {"country": "private", "city": "private", "lat": None, "lng": None}
 
         try:
             response = self.geoip.city(ip_address)
@@ -111,13 +111,12 @@ class AuditLogger:
             return {
                 "country": response.country.iso_code or "unknown",
                 "city": response.city.name or "unknown",
-                "asn": f"AS{response.traits.autonomous_system_number}" if hasattr(response.traits, 'autonomous_system_number') and response.traits.autonomous_system_number else "unknown",
                 "lat": lat,
                 "lng": lng,
             }
         except Exception as e:
             logger.debug(f"GeoIP lookup failed for {ip_address}: {e}")
-            return {"country": "unknown", "city": "unknown", "asn": "unknown", "lat": None, "lng": None}
+            return {"country": "unknown", "city": "unknown", "lat": None, "lng": None}
 
     # ------------------------------------------------------------------
     # Payload Builder
