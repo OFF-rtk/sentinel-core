@@ -36,31 +36,35 @@ graph LR
     Client ==>|"POST /evaluate"| API
 
     %% Dotted lines for persistence/state
-    API -.- Redis[(Redis)]:::storage
-    API -.- Supabase[(Supabase)]:::storage
+    API -.- Upstash[(Upstash Redis)]:::storage
+    API -.- AuditLogger[(Audit Logger)]:::logic
+    AuditLogger -.- Supabase[(Supabase)]:::storage
 ```
 
 ## Core Components
+- **Client (Next.js):** Captures high-frequency telemetry (mouse, keyboard) via non-blocking beacons
+- **Orchestrator (FastAPI):** Ingests streams, fuses signals, computes dynamic risk
+- **State Store (Upstash Redis):** Ephemeral session context (<5ms latency), shared blacklist/strike state
+- **Audit Logger:** Writes structured evaluation results to Supabase `audit_logs` with GeoIP enrichment
+- **Auditor (RAG Agent):** Reviews flagged sessions against security policy, escalates provisional bans
 
-### 1. Client (Integration Layer)
-The client application (e.g., a web dashboard or login page) collects raw events—keystrokes and mouse movements—and buffers them. It sends these batches to the Sentinel API asynchronously to minimize impact on the user experience.
-
-### 2. Orchestrator (The "Brain")
+### Orchestrator Detail
 The Orchestrator is the central controller. It:
 *   Receives incoming event batches.
-*   Hydrates the user's state from Redis.
+*   Hydrates the user's state from Upstash Redis.
 *   Routes data to the appropriate ML models.
 *   Updates the trust score based on model outputs.
 *   Decides on an action (ALLOW, CHALLENGE, BLOCK).
 
-### 3. Models (Intelligence)
+### Models (Intelligence)
 Statistical and ML models that analyze behavior.
 *   **Physics Models** (`PhysicsMouseModel`): Deterministic detection of impossible human movements using tiered biomechanical thresholds. Zero ML, zero learning.
-*   **Anomaly Models** (`KeyboardAnomalyModel`): River Half-Space Trees for online anomaly detection on keystroke dynamics. Used for both generic "human" detection (HST) and per-user identity verification.
-*   **Navigator Policy Engine** (`NavigatorPolicyEngine`): Stateless rule engine for context-based risk (impossible travel, device mismatch, policy violations).
+*   **Teleportation Detection**: Orchestrator counts MOVE events between CLICKs. <3 MOVEs before a click = cursor teleported (physically impossible with a real hand). Ratio becomes a standalone risk signal.
+*   **Anomaly Models** (`KeyboardAnomalyModel`): River Half-Space Trees for online anomaly detection on keystroke dynamics. Persistent per-user in Supabase. Used for both generic "human" detection (HST) and per-user identity verification.
+*   **Navigator Policy Engine** (`NavigatorPolicyEngine`): Stateless rule engine for context-based risk (unknown user agent, device mismatch). Includes TOFU (Trust On First Use) — first session's context is pinned and deviations are flagged.
 
-### 4. Persistence Layer (Memory)
-*   **Redis (Hot Storage)**: Stores the *current* session state, trust score, and temporal windows. We use Redis for its low latency and atomic operations, which are critical when multiple event streams arrive simultaneously.
+### Persistence Layer (Memory)
+*   **Redis (Upstash, Hot Storage)**: Stores session state, trust score, temporal windows, blacklist keys, and strike counters. Shared with the Auditor service — a single Upstash instance serves both Sentinel ML and the Auditor. Uses optimistic locking (WATCH/MULTI/EXEC) for consistency under concurrent requests.
 *   **Supabase (Cold Storage)**: Persists long-term user profiles and audit logs for post-incident analysis.
 
 ## Scaling Strategy

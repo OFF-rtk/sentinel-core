@@ -124,5 +124,31 @@ pytest
 ## Documentation
 For comprehensive documentation, including deep dives into the architecture, decision engine, and API contracts, please refer to the **[Documentation Hub](docs/README.md)**.
 
+## Demo Video
+
+📹 **[Watch the demo](https://youtu.be/WpPNUFyPTwM)** — A Playwright bot attempts to log into Vault Treasury with robotic typing patterns. Sentinel detects the anomalous behavior, escalates to a challenge, and terminates the session.
+
+### Reproduce the Attack
+
+Clone and run the [sentinel-bot](https://github.com/OFF-rtk/sentinel-bot) against the live deployment:
+
+```bash
+git clone https://github.com/OFF-rtk/sentinel-bot.git
+cd sentinel-bot
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+playwright install chromium
+python bot.py
+```
+
+The bot launches a visible Chromium window. It logs in, types the verification text with uniform 50ms inter-key timing (zero human jitter), gets re-challenged, and is ultimately blocked.
+
+| Signal | Bot | Human |
+|--------|-----|-------|
+| Keystroke timing | Constant 50ms | Gaussian ±30ms |
+| Mouse movement | Instant teleportation | Smooth curves |
+| Typing accuracy | 100%, zero corrections | Occasional typos |
+
 ## License
 Distributed under the MIT License. See LICENSE for details.
