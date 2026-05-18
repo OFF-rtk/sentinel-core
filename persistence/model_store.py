@@ -128,7 +128,24 @@ class ModelStore:
                     logger.error(f"Checksum mismatch for {user_id}/{model_type.value}")
                     return None
             
-            model = pickle.loads(blob)
+            # Deserialize — wrapped separately because river's Rust/pyo3 backend
+            # can panic (BaseException) on corrupted blobs, which bypasses
+            # a normal `except Exception` handler.
+            try:
+                model = pickle.loads(blob)
+            except BaseException as deser_err:
+                logger.error(
+                    f"Corrupted model blob for {user_id}/{model_type.value}: {deser_err}. "
+                    f"Deleting row so model is rebuilt from scratch."
+                )
+                try:
+                    self.client.table(self.TABLE_NAME).delete().eq(
+                        "user_id", user_id
+                    ).eq("model_type", model_type.value).execute()
+                    logger.info(f"Deleted corrupted {model_type.value} row for {user_id}")
+                except Exception as del_err:
+                    logger.error(f"Failed to delete corrupted row: {del_err}")
+                return None
             
             return StoredModel(
                 model=model,
@@ -138,7 +155,7 @@ class ModelStore:
                 model_type=model_type
             )
             
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Failed to load {model_type.value} for {user_id}: {e}")
             return None
     
